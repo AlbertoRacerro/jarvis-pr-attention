@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from pr_attention.github import GitHubError
 from pr_attention.rereview_threads_v11 import collect_review_threads_v11
 
 
@@ -100,6 +101,16 @@ class ReviewThreadTransportV11Tests(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(len(threads), 2)
         self.assertEqual(client.calls[1][1]["after"], "thread-cursor")
+
+    def test_missing_pull_request_truth_is_not_treated_as_zero_threads(self):
+        client = FakeGitHubClient([{"repository": {"pullRequest": None}}])
+        with self.assertRaises(GitHubError):
+            collect_review_threads_v11(client, "o/r", 7)
+
+    def test_thread_without_comment_history_is_malformed_evidence(self):
+        client = FakeGitHubClient([payload(comments=[])])
+        with self.assertRaises(GitHubError):
+            collect_review_threads_v11(client, "o/r", 7)
 
 
 if __name__ == "__main__":
