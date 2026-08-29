@@ -5,7 +5,9 @@ from typing import Any, Literal
 
 AttentionState = Literal["READY", "PENDING", "BLOCKED", "STALE", "UNKNOWN"]
 CIState = Literal["SUCCESS", "PENDING", "FAILURE", "UNKNOWN"]
+RequiredCheckState = Literal["NONE", "SUCCESS", "PENDING", "FAILURE", "UNKNOWN"]
 ReviewState = Literal["APPROVED", "CHANGES_REQUESTED", "NONE", "STALE_ONLY", "MIXED"]
+NativeReviewDecision = Literal["NONE", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", "UNKNOWN"]
 DeltaRelation = Literal["ABSENT", "CURRENT", "AHEAD", "BEHIND", "DIVERGED", "UNKNOWN"]
 AcceptanceValidity = Literal["ABSENT", "CURRENT", "REUSABLE_FOR_UNCHANGED", "INVALID", "UNKNOWN"]
 ReviewScope = Literal["NONE", "DELTA", "FULL", "UNKNOWN"]
@@ -22,6 +24,28 @@ NextActionClass = Literal[
 
 
 @dataclass(frozen=True)
+class RequiredCheckSummary:
+    known: bool
+    state: RequiredCheckState
+    required: list[dict[str, Any]] = field(default_factory=list)
+    passed: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class NativeReviewPolicySummary:
+    known: bool
+    draft: bool | None
+    review_decision: NativeReviewDecision
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class CheckSummary:
     state: CIState
     total: int = 0
@@ -29,6 +53,9 @@ class CheckSummary:
     pending: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
+    required: RequiredCheckSummary = field(
+        default_factory=lambda: RequiredCheckSummary(known=False, state="UNKNOWN")
+    )
 
 
 @dataclass(frozen=True)
@@ -39,6 +66,11 @@ class ReviewSummary:
     current_head_commented: list[str] = field(default_factory=list)
     stale_review_count: int = 0
     dismissed_review_count: int = 0
+    native_policy: NativeReviewPolicySummary = field(
+        default_factory=lambda: NativeReviewPolicySummary(
+            known=False, draft=None, review_decision="UNKNOWN"
+        )
+    )
 
 
 @dataclass(frozen=True)

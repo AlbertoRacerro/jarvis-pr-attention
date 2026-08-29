@@ -1,0 +1,54 @@
+name: Truth hardening dogfood
+on:
+  pull_request:
+permissions:
+  contents: read
+  checks: read
+  statuses: read
+  pull-requests: read
+jobs:
+  github-truth-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - id: baseline
+        name: Resolve exact merge-base baseline
+        shell: bash
+        run: echo "sha=$(git merge-base origin/${{ github.base_ref }} HEAD)" >> "$GITHUB_OUTPUT"
+      - id: attention
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          accepted-head: ${{ steps.baseline.outputs.sha }}
+          max-total-patch-bytes: "1000000"
+          max-file-patch-bytes: "250000"
+          reviewer-name: "truth-dogfood"
+      - name: Verify required-check and native-review truth
+        env:
+          SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ["SNAPSHOT_FILE"], encoding="utf-8") as handle:
+              snapshot = json.load(handle)
+          assert snapshot["schema_version"] == 2
+          assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert snapshot["facts_complete"] is True, snapshot["blockers"]
+
+          required = snapshot["checks"]["required"]
+          assert required["known"] is True
+          assert required["state"] in {"NONE", "SUCCESS", "PENDING", "FAILURE", "UNKNOWN"}
+          assert isinstance(required["required"], list)
+          assert isinstance(required["sources"], list)
+
+          native = snapshot["reviews"]["native_policy"]
+          assert native["known"] is True
+          assert native["draft"] is False
+          assert native["review_decision"] in {"NONE", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"}
+          assert any("not Jarvis semantic acceptance" in reason for reason in native["reasons"])
+          PY

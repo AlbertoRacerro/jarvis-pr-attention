@@ -5,18 +5,28 @@ from .models import ReviewPacket, Snapshot
 
 def render_text(snapshot: Snapshot) -> str:
     checks = snapshot.checks
+    required = checks.required
     reviews = snapshot.reviews
+    native = reviews.native_policy
     threads = snapshot.threads
     merge = snapshot.merge
     delta = snapshot.delta
 
     accepted = delta.accepted_head_sha[:12] if delta.accepted_head_sha else "none"
+    native_text = (
+        f"draft={str(native.draft).lower()} decision={native.review_decision}"
+        if native.known
+        else "UNKNOWN"
+    )
+    required_count = len(required.required)
     lines = [
         f"PR #{snapshot.pr_number} — ATTENTION",
         "",
         f"HEAD        {snapshot.head_sha[:12]} {'CURRENT' if not snapshot.stale else 'STALE'}",
         f"CI          {checks.state} ({len(checks.passed)} passed / {len(checks.pending)} pending / {len(checks.failed)} failed / {len(checks.unknown)} unknown)",
+        f"REQUIRED    {required.state if required.known else 'UNKNOWN'} ({required_count} required)",
         f"REVIEW      {reviews.state} ({len(reviews.current_head_approvals)} current approval(s), {reviews.stale_review_count} stale review(s))",
+        f"NATIVE      {native_text}",
         f"THREADS     {threads.unresolved_current} current unresolved / {threads.unresolved_outdated} outdated unresolved / {threads.resolved} resolved",
         f"MERGE       {'CONFLICT' if merge.conflict else ('MERGEABLE' if merge.mergeable else 'UNKNOWN')}",
         f"ACCEPTED    {accepted} ({delta.acceptance_validity})",
@@ -25,6 +35,10 @@ def render_text(snapshot: Snapshot) -> str:
         f"NEXT        {snapshot.next_action_class}",
     ]
 
+    if required.reasons:
+        lines.extend(["", "REQUIRED CHECK POLICY", *[f"- {item}" for item in required.reasons]])
+    if native.reasons:
+        lines.extend(["", "NATIVE REVIEW POLICY", *[f"- {item}" for item in native.reasons]])
     if delta.reasons:
         lines.extend(["", "REVIEW PLAN", *[f"- {item}" for item in delta.reasons]])
     if delta.files and delta.review_scope == "DELTA":

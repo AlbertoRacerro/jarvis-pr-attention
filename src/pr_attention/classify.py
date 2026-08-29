@@ -37,8 +37,26 @@ def classify_attention(
     elif checks.state == "UNKNOWN":
         pending.append("CI state is unknown or no CI evidence exists")
 
+    required = checks.required
+    if required.known:
+        if required.state == "FAILURE":
+            blockers.append("required GitHub checks are failing")
+        elif required.state == "PENDING":
+            pending.append("required GitHub checks are pending or missing")
+        elif required.state == "UNKNOWN":
+            return "UNKNOWN", ["required GitHub check state is ambiguous"], pending
+
     if reviews.current_head_changes_requested:
         blockers.append("current-head review requests changes")
+
+    native = reviews.native_policy
+    if native.known:
+        if native.draft is True:
+            blockers.append("pull request is draft")
+        if native.review_decision == "CHANGES_REQUESTED":
+            blockers.append("GitHub native review decision requests changes")
+        elif native.review_decision == "REVIEW_REQUIRED":
+            pending.append("GitHub native review policy still requires review")
 
     if threads.unresolved_current:
         blockers.append(f"{threads.unresolved_current} unresolved current review thread(s)")

@@ -135,6 +135,7 @@ class FakeClient:
         sha = HEAD if self.pr_calls < 3 else self.final_packet_head
         return {
             "title": "x",
+            "draft": False,
             "head": {"sha": sha, "ref": "feature"},
             "base": {"ref": "main"},
             "mergeable": True,
@@ -155,6 +156,15 @@ class FakeClient:
 
     def review_threads(self, repo, number):
         return []
+
+    def branch(self, repo, branch):
+        return {"protected": False, "protection": {"required_status_checks": {"contexts": [], "checks": []}}}
+
+    def branch_rules(self, repo, branch):
+        return []
+
+    def review_policy(self, repo, number):
+        return {"isDraft": False, "reviewDecision": None}
 
     def compare(self, repo, base, head):
         return {

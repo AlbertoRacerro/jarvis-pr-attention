@@ -30,7 +30,14 @@ class GitHubClient:
             raise GitHubError("GITHUB_TOKEN or GH_TOKEN is required")
         return cls(token=token)
 
-    def _request(self, url: str, *, method: str = "GET", data: bytes | None = None, accept: str = "application/vnd.github+json") -> tuple[Any, dict[str, str]]:
+    def _request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        accept: str = "application/vnd.github+json",
+    ) -> tuple[Any, dict[str, str]]:
         request = urllib.request.Request(
             url,
             data=data,
@@ -39,7 +46,7 @@ class GitHubClient:
                 "Authorization": f"Bearer {self.token}",
                 "Accept": accept,
                 "X-GitHub-Api-Version": API_VERSION,
-                "User-Agent": "jarvis-pr-attention/0.2",
+                "User-Agent": "jarvis-pr-attention/0.12",
                 "Content-Type": "application/json",
             },
         )
@@ -60,6 +67,8 @@ class GitHubClient:
         return payload
 
     def rest_paginated(self, path: str, *, max_pages: int = MAX_PAGES) -> list[Any]:
+        if max_pages < 1:
+            raise ValueError("max_pages must be positive")
         results: list[Any] = []
         next_url: str | None = f"{API_BASE}{path}"
         pages = 0
@@ -70,6 +79,8 @@ class GitHubClient:
             results.extend(payload)
             next_url = _next_link(headers.get("link"))
             pages += 1
+        if next_url is not None:
+            raise GitHubError("GitHub pagination safety ceiling exhausted before all pages were retrieved")
         return results
 
     def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
@@ -85,30 +96,72 @@ class GitHubClient:
         return data
 
     def pull_request(self, repo: str, number: int) -> dict[str, Any]:
-        return self.rest(f"/repos/{repo}/pulls/{number}")
+        payload = self.rest(f"/repos/{repo}/pulls/{number}")
+        if not isinstance(payload, dict):
+            raise GitHubError("pull request response was not an object")
+        return payload
+
+    def branch(self, repo: str, branch: str) -> dict[str, Any]:
+        quoted = urllib.parse.quote(branch, safe="")
+        payload = self.rest(f"/repos/{repo}/branches/{quoted}")
+        if not isinstance(payload, dict):
+            raise GitHubError("branch response was not an object")
+        return payload
+
+    def branch_rules(self, repo: str, branch: str) -> list[dict[str, Any]]:
+        quoted = urllib.parse.quote(branch, safe="")
+        payload = self.rest_paginated(f"/repos/{repo}/rules/branches/{quoted}?per_page=100")
+        if any(not isinstance(item, dict) for item in payload):
+            raise GitHubError("branch rules response contained an invalid entry")
+        return payload
+
+    def review_policy(self, repo: str, number: int) -> dict[str, Any]:
+        owner, name = repo.split("/", 1)
+        query = """
+        query PullRequestPolicy($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) { isDraft reviewDecision }
+          }
+        }
+        """
+        data = self.graphql(query, {"owner": owner, "name": name, "number": number})
+        pr = ((data.get("repository") or {}).get("pullRequest"))
+        if not isinstance(pr, dict):
+            raise GitHubError("GraphQL pull request policy response was unavailable")
+        return pr
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
         return self.rest_paginated(f"/repos/{repo}/pulls/{number}/reviews?per_page=100")
 
     def check_runs(self, repo: str, head_sha: str) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
+        total_count: int | None = None
         for page in range(1, MAX_PAGES + 1):
             payload = self.rest(f"/repos/{repo}/commits/{head_sha}/check-runs?per_page=100&page={page}")
-            batch = list((payload or {}).get("check_runs") or [])
+            if not isinstance(payload, dict):
+                raise GitHubError("check-runs response was not an object")
+            raw_total = payload.get("total_count")
+            if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0:
+                total_count = raw_total
+            batch = list(payload.get("check_runs") or [])
             runs.extend(batch)
+            if total_count is not None and len(runs) >= total_count:
+                return runs
             if len(batch) < 100:
-                break
-        return runs
+                return runs
+        raise GitHubError("GitHub check-runs pagination safety ceiling exhausted before all pages were retrieved")
 
     def status_contexts(self, repo: str, head_sha: str) -> list[dict[str, Any]]:
         statuses: list[dict[str, Any]] = []
         for page in range(1, MAX_PAGES + 1):
             payload = self.rest(f"/repos/{repo}/commits/{head_sha}/status?per_page=100&page={page}")
-            batch = list((payload or {}).get("statuses") or [])
+            if not isinstance(payload, dict):
+                raise GitHubError("combined status response was not an object")
+            batch = list(payload.get("statuses") or [])
             statuses.extend(batch)
             if len(batch) < 100:
-                break
-        return statuses
+                return statuses
+        raise GitHubError("GitHub status-context pagination safety ceiling exhausted before all pages were retrieved")
 
     def compare(self, repo: str, base_sha: str, head_sha: str) -> dict[str, Any]:
         base = urllib.parse.quote(base_sha, safe="")
@@ -142,17 +195,24 @@ class GitHubClient:
         """
         nodes: list[dict[str, Any]] = []
         after: str | None = None
+        has_next = False
         for _ in range(MAX_PAGES):
             data = self.graphql(query, {"owner": owner, "name": name, "number": number, "after": after})
             pr = (((data.get("repository") or {}).get("pullRequest")) or {})
             connection = pr.get("reviewThreads") or {}
-            nodes.extend(connection.get("nodes") or [])
+            raw_nodes = connection.get("nodes") or []
+            if not isinstance(raw_nodes, list):
+                raise GitHubError("reviewThreads nodes were not a list")
+            nodes.extend(raw_nodes)
             page_info = connection.get("pageInfo") or {}
-            if not page_info.get("hasNextPage"):
-                break
+            has_next = page_info.get("hasNextPage") is True
+            if not has_next:
+                return nodes
             after = page_info.get("endCursor")
             if not after:
                 raise GitHubError("reviewThreads pagination reported next page without cursor")
+        if has_next:
+            raise GitHubError("GitHub review-thread pagination safety ceiling exhausted before all pages were retrieved")
         return nodes
 
 

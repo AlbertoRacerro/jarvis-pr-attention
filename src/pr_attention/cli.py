@@ -4,8 +4,9 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 from .classify import classify_attention, classify_next_action
 from .github import GitHubClient, GitHubError
@@ -20,6 +21,7 @@ from .packet import (
 from .review_result import load_json_object, packet_sha256, validate_review_result
 from .normalize import normalize_checks, normalize_delta, normalize_reviews, normalize_threads
 from .render import render_packet_text, render_text
+from .truth import normalize_native_review_policy, normalize_required_checks
 
 EXIT_CODES = {"READY": 0, "PENDING": 10, "BLOCKED": 20, "STALE": 30, "UNKNOWN": 40}
 PACKET_EXIT_CODES = {"COMPLETE": 0, "PARTIAL": 50, "NONE": 60, "UNKNOWN": 70}
@@ -41,6 +43,12 @@ INTEGRATION_EXIT_CODES = {
     "UNKNOWN": 96,
 }
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_T = TypeVar("_T")
+
+
+def _bounded_error(label: str, exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    return f"{label}: {text[:240]}"
 
 
 def collect_snapshot(client: GitHubClient, repo: str, number: int, *, accepted_head_sha: str | None = None) -> Snapshot:
@@ -51,29 +59,42 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int, *, accepted_h
     head_sha = str(((pr.get("head") or {}).get("sha") or ""))
     if not head_sha:
         raise GitHubError("pull request response did not contain head SHA")
+    base_ref = str(((pr.get("base") or {}).get("ref") or ""))
+    if not base_ref:
+        raise GitHubError("pull request response did not contain base ref")
 
-    facts_complete = True
-    try:
-        check_runs = client.check_runs(repo, head_sha)
-        status_contexts = client.status_contexts(repo, head_sha)
-        reviews_raw = client.reviews(repo, number)
-        thread_nodes = client.review_threads(repo, number)
-    except GitHubError:
-        facts_complete = False
-        check_runs = []
-        status_contexts = []
-        reviews_raw = []
-        thread_nodes = []
+    fact_errors: list[str] = []
+
+    def attempt(label: str, fn: Callable[[], _T], fallback: _T) -> _T:
+        try:
+            return fn()
+        except GitHubError as exc:
+            fact_errors.append(_bounded_error(label, exc))
+            return fallback
+
+    check_runs = attempt("check runs", lambda: client.check_runs(repo, head_sha), [])
+    status_contexts = attempt("commit statuses", lambda: client.status_contexts(repo, head_sha), [])
+    reviews_raw = attempt("reviews", lambda: client.reviews(repo, number), [])
+    thread_nodes = attempt("review threads", lambda: client.review_threads(repo, number), [])
+    branch_payload = attempt("base branch", lambda: client.branch(repo, base_ref), None)
+    branch_rules = attempt("effective branch rules", lambda: client.branch_rules(repo, base_ref), None)
+    review_policy_payload = attempt("native review policy", lambda: client.review_policy(repo, number), None)
 
     compare_payload = None
     if accepted_head_sha and accepted_head_sha != head_sha:
-        try:
-            compare_payload = client.compare(repo, accepted_head_sha, head_sha)
-        except GitHubError:
-            compare_payload = None
+        compare_payload = attempt(
+            "accepted-head compare",
+            lambda: client.compare(repo, accepted_head_sha, head_sha),
+            None,
+        )
 
-    checks = normalize_checks(check_runs, status_contexts)
-    reviews = normalize_reviews(reviews_raw, head_sha)
+    required = normalize_required_checks(branch_payload, branch_rules, check_runs, status_contexts)
+    checks = replace(normalize_checks(check_runs, status_contexts), required=required)
+    native_policy = normalize_native_review_policy(
+        review_policy_payload,
+        rest_draft=pr.get("draft") if isinstance(pr.get("draft"), bool) else None,
+    )
+    reviews = replace(normalize_reviews(reviews_raw, head_sha), native_policy=native_policy)
     threads = normalize_threads(thread_nodes)
     delta = normalize_delta(accepted_head_sha, head_sha, compare_payload)
 
@@ -84,12 +105,13 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int, *, accepted_h
         conflict=False if mergeable is True else (True if mergeable is False else None),
     )
 
-    final_pr = client.pull_request(repo, number)
+    final_pr = attempt("final pull-request head", lambda: client.pull_request(repo, number), {})
     final_head_sha = str(((final_pr.get("head") or {}).get("sha") or ""))
     if not final_head_sha:
-        facts_complete = False
+        fact_errors.append("final pull-request head: response did not contain head SHA")
         final_head_sha = head_sha
 
+    facts_complete = not fact_errors
     attention, blockers, pending = classify_attention(
         initial_head_sha=head_sha,
         final_head_sha=final_head_sha,
@@ -99,14 +121,19 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int, *, accepted_h
         merge=merge,
         facts_complete=facts_complete,
     )
+    if fact_errors:
+        blockers = list(blockers) + [f"GitHub fact unavailable — {item}" for item in fact_errors]
     next_action = classify_next_action(attention, delta)
 
     return Snapshot(
+        # V1.10 is an additive schema-v2 hardening: required-check and native-policy
+        # facts live inside already-hashed checks/reviews blocks, preserving historical
+        # schema-v2 bundle verification while binding the new facts in fresh bundles.
         schema_version=2,
         repository=repo,
         pr_number=number,
         title=str(pr.get("title") or ""),
-        base_ref=str(((pr.get("base") or {}).get("ref") or "")),
+        base_ref=base_ref,
         head_ref=str(((pr.get("head") or {}).get("ref") or "")),
         head_sha=head_sha,
         final_head_sha=final_head_sha,
