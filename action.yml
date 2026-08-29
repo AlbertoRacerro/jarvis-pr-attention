@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, and an advisory integration gate"
+description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, integration gate, and one unified evidence bundle"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -95,6 +95,15 @@ outputs:
   integration-gate-file:
     description: "Path to JSON integration gate; empty when review-result-file is not supplied"
     value: ${{ steps.snapshot.outputs.integration-gate-file }}
+  evidence-bundle-file:
+    description: "Path to the unified deterministic evidence bundle JSON"
+    value: ${{ steps.snapshot.outputs.evidence-bundle-file }}
+  evidence-bundle-sha256:
+    description: "Stable content identity of the evidence bundle manifest; not a signature"
+    value: ${{ steps.snapshot.outputs.evidence-bundle-sha256 }}
+  evidence-bundle-phase:
+    description: "SNAPSHOT_ONLY, PACKET_READY, REVIEW_HANDOFF_READY, REVIEW_VALIDATED or INTEGRATION_EVALUATED"
+    value: ${{ steps.snapshot.outputs.evidence-bundle-phase }}
 runs:
   using: "composite"
   steps:
@@ -193,8 +202,7 @@ runs:
           review_result_valid="${validation_values[1]}"
 
           integration_gate_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-integration-gate.json"
-          python3 -m pr_attention integration-gate "$out" "$validation_out" \
-            --output "$integration_gate_out" --no-gate-exit >/dev/null
+          python3 -m pr_attention integration-gate "$out" "$validation_out" --output "$integration_gate_out" --no-gate-exit >/dev/null
           readarray -t integration_values < <(python3 - "$integration_gate_out" <<'PY'
         import json, sys
         with open(sys.argv[1], encoding="utf-8") as handle:
@@ -207,9 +215,29 @@ runs:
           integration_merge_ready="${integration_values[1]}"
         fi
 
-        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$template_out" "$envelope_out" "$validation_out" "$review_result_status" "$review_result_valid" "$integration_gate_out" "$integration_gate_status" "$integration_merge_ready" <<'PY'
+        bundle_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-evidence-bundle.json"
+        bundle_args=(build "$out" --output "$bundle_out")
+        if [[ -n "$packet_out" ]]; then
+          bundle_args+=(--packet-file "$packet_out" --envelope-file "$envelope_out")
+        fi
+        if [[ -n "$validation_out" ]]; then
+          bundle_args+=(--review-result-file "$REVIEW_RESULT_FILE" --validation-file "$validation_out" --integration-gate-file "$integration_gate_out")
+        fi
+        python3 -m pr_attention.bundle_cli "${bundle_args[@]}" >/dev/null
+        readarray -t bundle_values < <(python3 - "$bundle_out" <<'PY'
         import json, sys
-        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, template_path, envelope_path, validation_path, result_status, result_valid, integration_path, integration_status, integration_ready = sys.argv[1:]
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            bundle = json.load(handle)
+        print(bundle["bundle_sha256"])
+        print(bundle["phase"])
+        PY
+        )
+        bundle_digest="${bundle_values[0]}"
+        bundle_phase="${bundle_values[1]}"
+
+        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$template_out" "$envelope_out" "$validation_out" "$review_result_status" "$review_result_valid" "$integration_gate_out" "$integration_gate_status" "$integration_merge_ready" "$bundle_out" "$bundle_digest" "$bundle_phase" <<'PY'
+        import json, sys
+        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, template_path, envelope_path, validation_path, result_status, result_valid, integration_path, integration_status, integration_ready, bundle_path, bundle_digest, bundle_phase = sys.argv[1:]
         with open(path, encoding="utf-8") as handle:
             snapshot = json.load(handle)
         values = {
@@ -232,6 +260,9 @@ runs:
             "integration-gate-file": integration_path,
             "integration-gate-status": integration_status,
             "integration-merge-ready": integration_ready,
+            "evidence-bundle-file": bundle_path,
+            "evidence-bundle-sha256": bundle_digest,
+            "evidence-bundle-phase": bundle_phase,
         }
         with open(output, "a", encoding="utf-8") as handle:
             for key, value in values.items():

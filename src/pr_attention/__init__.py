@@ -1,6 +1,7 @@
 """Deterministic exact-head pull request attention snapshots."""
 
 from .cli import collect_snapshot
+from .evidence_bundle import build_evidence_bundle, bundle_sha256, verify_evidence_bundle
 from .handoff import build_review_envelope, build_review_result_template
 from .integration_gate import build_integration_gate
 from .packet import collect_review_packet
@@ -14,5 +15,8 @@ __all__ = [
     "build_review_result_template",
     "build_review_envelope",
     "build_integration_gate",
+    "build_evidence_bundle",
+    "bundle_sha256",
+    "verify_evidence_bundle",
 ]
-__version__ = "0.6.0"
+__version__ = "0.7.0"
