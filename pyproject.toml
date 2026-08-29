@@ -17,6 +17,7 @@ pr-attention-bundle = "pr_attention.bundle_cli:main"
 pr-attention-compact = "pr_attention.compact_cli:main"
 pr-attention-rereview = "pr_attention.rereview_cli:main"
 pr-attention-rereview-bundle = "pr_attention.rereview_bundle_cli:main"
+pr-attention-continuity = "pr_attention.continuity_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
