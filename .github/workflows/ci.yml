@@ -90,13 +90,14 @@ jobs:
           reviewer-name: "ci-dogfood"
           reviewer-model: "deterministic-fixture"
           review-result-file: ${{ steps.synthetic.outputs.path }}
-      - name: Verify exact head, handoff, and structured review-result binding
+      - name: Verify exact head, handoff, semantic result, and integration gate
         env:
           SNAPSHOT_FILE: ${{ steps.validated.outputs.snapshot-file }}
           PACKET_FILE: ${{ steps.validated.outputs.review-packet-file }}
           TEMPLATE_FILE: ${{ steps.validated.outputs.review-result-template-file }}
           ENVELOPE_FILE: ${{ steps.validated.outputs.review-envelope-file }}
           VALIDATION_FILE: ${{ steps.validated.outputs.review-result-validation-file }}
+          INTEGRATION_FILE: ${{ steps.validated.outputs.integration-gate-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           EXPECTED_BASELINE: ${{ steps.baseline.outputs.sha }}
           REVIEW_SCOPE: ${{ steps.validated.outputs.review-scope }}
@@ -107,6 +108,8 @@ jobs:
           SECOND_PACKET_SHA256: ${{ steps.validated.outputs.packet-sha256 }}
           REVIEW_RESULT_STATUS: ${{ steps.validated.outputs.review-result-status }}
           REVIEW_RESULT_VALID: ${{ steps.validated.outputs.review-result-valid }}
+          INTEGRATION_STATUS: ${{ steps.validated.outputs.integration-gate-status }}
+          INTEGRATION_READY: ${{ steps.validated.outputs.integration-merge-ready }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -120,6 +123,8 @@ jobs:
               envelope = json.load(handle)
           with open(os.environ["VALIDATION_FILE"], encoding="utf-8") as handle:
               validation = json.load(handle)
+          with open(os.environ["INTEGRATION_FILE"], encoding="utf-8") as handle:
+              integration = json.load(handle)
           control = envelope["control_plane"]
           evidence = envelope["untrusted_evidence"]
           assert snapshot["schema_version"] == 2
@@ -157,4 +162,19 @@ jobs:
           assert validation["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert validation["live_head_sha"] == os.environ["EXPECTED_HEAD"]
           assert validation["packet_sha256"] == os.environ["SECOND_PACKET_SHA256"]
+          expected_gate = {
+              "READY": "READY_TO_MERGE",
+              "PENDING": "WAIT_FOR_GATES",
+              "BLOCKED": "REPAIR",
+              "UNKNOWN": "UNKNOWN",
+          }[snapshot["attention"]]
+          assert integration["status"] == expected_gate
+          assert os.environ["INTEGRATION_STATUS"] == expected_gate
+          assert integration["merge_ready"] is (expected_gate == "READY_TO_MERGE")
+          assert os.environ["INTEGRATION_READY"] == str(expected_gate == "READY_TO_MERGE").lower()
+          assert integration["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert integration["packet_sha256"] == os.environ["SECOND_PACKET_SHA256"]
+          assert integration["semantic_review_status"] == "VALID_PASS"
+          assert integration["live_review_bound"] is True
+          assert "exact-head guard" in integration["safety_notice"]
           PY
