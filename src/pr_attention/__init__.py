@@ -46,4 +46,4 @@ __all__ = [
     "normalize_required_checks",
     "normalize_native_review_policy",
 ]
-__version__ = "0.12.0"
+__version__ = "0.13.0"

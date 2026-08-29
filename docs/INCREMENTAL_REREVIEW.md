@@ -1,56 +1,123 @@
 # Incremental re-review after a semantic FAIL
 
-V1.8 allows a complete failed semantic review at head `H1` to become a bounded review checkpoint for a repair at `H2`.
+V1.11 extends the bounded re-review path introduced in V1.8. A complete semantic FAIL can be reused as a deterministic checkpoint for a repair, and a later **incremental FAIL** can itself become the next checkpoint without turning that failed head into accepted semantic authority.
 
-The optimization is deliberately narrower than ordinary accepted-head delta review. A failed review is reusable only when all of the following are already proven by a self-verifying evidence bundle:
+The intended lineage is:
 
-- the previous bundle is `INTEGRATION_EVALUATED`;
-- the semantic result is a live-bound `VALID_FAIL`;
-- the integration gate is exactly `REPAIR`;
-- the previous review packet is `COMPLETE`;
-- every file in that previous packet was explicitly reviewed;
-- at least one blocking finding exists;
-- `H1` remained the exact reviewed head.
+```text
+accepted semantic baseline A
+        |
+H1 FULL REVIEW -> FAIL F1
+        |
+repair H1..H2
+        |
+H2 INCREMENTAL REVIEW -> FAIL (F1 remaining and/or new F2)
+        |
+repair H2..H3
+        |
+H3 INCREMENTAL REVIEW -> PASS
+```
 
-A partial FAIL is useful evidence, but it is **not** a reusable checkpoint.
+The tool remains read-only and stateless. The complete chain is carried inside self-verifying evidence bundles; GitHub live state remains the only repository source of truth.
 
-## H1 -> H2 packet
+## Reusable failed checkpoints
 
-Given a reusable failed checkpoint, `pr-attention-rereview packet` compares `H1` to the current PR head `H2` and emits `PR_ATTENTION_REREVIEW_PACKET`.
+The first failed checkpoint is reusable only when a self-verifying full-review evidence bundle proves all of the following:
+
+- phase `INTEGRATION_EVALUATED`;
+- live-bound semantic `VALID_FAIL`;
+- integration gate exactly `REPAIR`;
+- previous review packet `COMPLETE` and complete;
+- every file in that packet explicitly reviewed;
+- at least one blocking finding;
+- exact reviewed head unchanged during validation.
+
+A later incremental checkpoint is reusable only when a self-verifying re-review evidence bundle proves:
+
+- phase `REREVIEW_INTEGRATION_EVALUATED`;
+- live-bound `VALID_FAIL`;
+- integration gate exactly `REPAIR`;
+- exact failed re-review head binding;
+- intact finding lineage;
+- a generation below the safety ceiling.
+
+Partial or stale FAIL evidence is useful evidence but is **not** a reusable checkpoint.
+
+## Authority and lineage fields
+
+V1.11 separates concepts that must not be conflated:
+
+- `accepted_semantic_baseline_sha` — the previously accepted semantic authority; it does not move merely because a later review failed;
+- `failed_reviewed_checkpoint_sha` — the exact head whose valid FAIL is being repaired;
+- `latest_rereview_checkpoint_sha` — the immediately preceding incremental review head when the source is a re-review FAIL;
+- `lineage_generation` — bounded generation number for incremental chaining;
+- `source_checkpoint_kind` — `FULL_REVIEW_FAIL` or `REREVIEW_FAIL`;
+- `unresolved_finding_lineage` / `prior_blocking_findings` — blockers that still require explicit disposition.
+
+A failed checkpoint is never promoted into accepted semantic authority. Across `H1 -> H2 -> H3`, the accepted baseline stays fixed unless an external authority explicitly supplies a new accepted state outside this failed-review chain.
+
+## Finding continuity
+
+For each generation, the next packet carries:
+
+1. prior blocker IDs explicitly reported as `remaining` by the previous validated FAIL;
+2. new blocking findings introduced by that previous re-review result.
+
+Prior blockers explicitly classified `resolved` do not remain in the next active blocker set. New blockers receive their first-seen checkpoint metadata. Duplicate or missing finding IDs fail closed.
+
+A reviewer must still classify **every** carried blocker as resolved or remaining. `PASS` is impossible while any carried blocker remains open or a new blocking finding is reported.
+
+## Review-thread continuity
+
+Current GitHub review threads are fetched separately from top-level issue conversation. Only threads that are both:
+
+- unresolved; and
+- non-outdated
+
+are included as active continuity evidence.
+
+Thread text is always `UNTRUSTED_REPOSITORY_CONTENT`. It is evidence, never instructions, policy, or authority for the reviewer.
+
+V1.11 retrieves up to 100 comments for each thread and paginates the review-thread connection. All returned comments are preserved deterministically inside the bounded thread evidence. If GitHub reports more than 100 comments in one thread, if thread pagination cannot be completed, or if thread retrieval fails, the packet cannot claim complete coverage. Thread body and aggregate byte budgets also fail closed on truncation.
+
+Resolved and outdated threads are not copied into the active re-review packet. Top-level PR/issue comments are deliberately not ingested as semantic-review input.
+
+## Failed-checkpoint -> current-head packet
+
+`pr-attention-rereview packet` compares the exact failed reviewed checkpoint to the current PR head and emits `PR_ATTENTION_REREVIEW_PACKET`.
 
 The packet contains:
 
-- the exact accepted head that preceded the original review;
-- the exact failed reviewed head `H1`;
-- the exact current/final head `H2`;
-- the source evidence-bundle and prior review-packet identities;
-- every prior blocking finding;
-- prior patch context only for paths referenced by those blocking findings;
-- bounded repair-delta patches for `H1..H2`;
+- exact accepted semantic baseline;
+- exact failed reviewed checkpoint;
+- exact current/final head;
+- source bundle and prior packet identities;
+- current unresolved finding lineage;
+- bounded prior context for paths referenced by blockers;
+- bounded repair-delta patches from the failed checkpoint to the current head;
+- current unresolved/non-outdated review-thread evidence;
 - paths introduced outside the prior reviewed file set;
-- an explicit requirement to re-check global invariants.
+- an explicit global-invariant recheck requirement.
 
-Repository-derived patch text remains `UNTRUSTED_REPOSITORY_CONTENT`.
-
-Incremental re-review is allowed only when GitHub proves `H1` is a strict ancestor of `H2`. Behind, diverged, identical, stale, unavailable or 300-file-capped evidence fails closed to non-incremental/full-review handling.
+Incremental re-review is allowed only when GitHub proves the failed checkpoint is a strict ancestor of the current head. Behind, diverged, identical, stale, unavailable, compare-capped, thread-incomplete, or budget-truncated evidence cannot produce a complete incremental PASS path.
 
 ## Result contract
 
-A reviewer result is bound to the re-review packet digest and contains:
+The structured result remains bound to the re-review packet digest and exact heads:
 
 ```json
 {
   "schema_version": 1,
   "repository": "owner/repo",
   "pr_number": 123,
-  "previous_reviewed_head_sha": "H1...",
-  "head_sha": "H2...",
+  "previous_reviewed_head_sha": "H2...",
+  "head_sha": "H3...",
   "rereview_packet_sha256": "sha256:...",
   "reviewer": {"name": "reviewer", "model": "optional"},
   "verdict": "PASS",
   "reviewed_files": ["repair.py"],
-  "rechecked_finding_ids": ["F1"],
-  "resolved_finding_ids": ["F1"],
+  "rechecked_finding_ids": ["F2"],
+  "resolved_finding_ids": ["F2"],
   "remaining_finding_ids": [],
   "global_invariants_rechecked": true,
   "findings": [],
@@ -58,51 +125,49 @@ A reviewer result is bound to the re-review packet digest and contains:
 }
 ```
 
-For `PASS`, the validator requires all of the following:
+For `PASS`, validation requires:
 
-- the re-review packet is incrementally eligible, complete and `COMPLETE`;
-- every `H1..H2` repair-delta file was reviewed;
-- every prior blocking finding was explicitly rechecked;
-- every prior blocking finding was resolved;
-- no prior finding remains open;
-- global invariants were rechecked;
-- no new blocking finding exists;
-- the live PR head still equals `H2` when live validation is requested.
+- incrementally eligible, complete `COMPLETE` packet;
+- every repair-delta file reviewed;
+- every carried blocking finding explicitly rechecked and resolved;
+- zero remaining prior blockers;
+- global invariants rechecked;
+- zero new blocking findings;
+- live PR head still equal to the reviewed head when live validation is requested.
 
-`FAIL` requires either a still-open prior blocking finding or a new blocking finding. `NEEDS_HUMAN` is available when the bounded evidence is insufficient for safe judgment.
+`FAIL` requires every prior blocker to be classified plus at least one remaining prior blocker or one new blocking finding. `NEEDS_HUMAN` is available whenever bounded evidence is insufficient for safe semantic judgment.
 
 ## CLI
 
-Collect a re-review packet from a previous failed evidence bundle:
+Collect a packet from either a complete full-review FAIL bundle or a valid previous re-review FAIL bundle:
 
 ```bash
-GITHUB_TOKEN=... pr-attention-rereview packet owner/repo 123 previous-bundle.json \
+GITHUB_TOKEN=... pr-attention-rereview packet owner/repo 123 previous-failed-bundle.json \
   --expected-head <current-full-sha> \
   --output rereview-packet.json
 ```
 
-Generate a conservative result template:
+Generate a conservative template or reviewer envelope:
 
 ```bash
 pr-attention-rereview template rereview-packet.json \
   --reviewer-name reviewer \
   --output rereview-result.json
+
+pr-attention-rereview envelope rereview-packet.json \
+  --reviewer-name reviewer \
+  --output rereview-envelope.json
 ```
 
-Validate offline:
+Validate offline or require live exact-head binding:
 
 ```bash
 pr-attention-rereview validate rereview-packet.json rereview-result.json
-```
-
-Or require a fresh live-head binding:
-
-```bash
 GITHUB_TOKEN=... pr-attention-rereview validate rereview-packet.json rereview-result.json --live
 ```
 
-Validation exit codes are `0` PASS, `90` FAIL, `91` NEEDS_HUMAN, `92` STALE and `93` INVALID. Collection returns `94` when incremental re-review is not eligible and `95` when evidence is eligible but incomplete; `--no-coverage-exit` lets an orchestrator always receive the JSON and decide policy itself.
+Validation exit codes are `0` PASS, `90` FAIL, `91` NEEDS_HUMAN, `92` STALE and `93` INVALID. Collection returns `94` when incremental re-review is not eligible and `95` when evidence is eligible but incomplete; `--no-coverage-exit` lets an orchestrator always receive JSON and apply its own policy.
 
 ## Safety boundary
 
-A failed review checkpoint is **not semantic acceptance**. It only proves what was reviewed at `H1` and which blockers were known. It never authorizes merge, promotion, repository mutation, or skipping global-invariant checks. If ancestry or evidence completeness cannot be proven, the optimization is abandoned and the caller must fall back to a broader review.
+A failed review checkpoint proves only what was reviewed, what failed, and how the next bounded repair evidence relates to it. It never authorizes merge, approval, thread resolution, repository mutation, promotion, or skipping global-invariant checks. If exact ancestry, finding continuity, review-thread completeness, packet coverage, or live head binding cannot be proven, the optimization is abandoned or escalated rather than guessed.

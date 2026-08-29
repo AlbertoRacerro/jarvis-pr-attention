@@ -74,7 +74,7 @@ Deliberately excluded:
 
 Those omissions are architectural requirements, not backlog. GitHub live state remains the truth source and this tool does not actuate repository state.
 
-## dan-sotnik/llama-pr-reviewer — relevant subset: about 75–80% covered
+## dan-sotnik/llama-pr-reviewer — relevant subset: about 90–95% covered
 
 Covered:
 
@@ -83,20 +83,26 @@ Covered:
 - hard total/per-file patch budgets;
 - exact-head regeneration and stale detection;
 - failed-review checkpoint reuse;
-- H1-to-H2 repair-only re-review;
-- prior blocking-finding continuity;
+- failed-checkpoint-to-current repair-only re-review;
+- multi-generation `FULL FAIL H1 -> incremental FAIL H2 -> incremental H3` chaining;
+- accepted semantic baseline kept distinct from failed reviewed checkpoints;
+- unresolved prior blocking-finding lineage across generations;
+- explicit resolved/remaining finding classification;
 - scope-expansion file identification;
 - global-invariant recheck requirement;
+- current unresolved/non-outdated GitHub review-thread continuity evidence;
+- bounded thread evidence with nested-comment and thread-pagination fail-closed behavior;
+- explicit trust boundary that treats thread bodies and patch text as untrusted evidence;
 - bounded incremental PASS/FAIL validation.
 
-Genuine remaining gaps:
+Remaining differences:
 
-- active unresolved/non-outdated review threads are not yet folded into the re-review packet as continuity evidence;
-- no explicit prior-self-comment echo suppression because this tool does not ingest top-level reviewer conversation as review input;
-- the exact `base -> PR net diff` plus path narrowing algorithm used there is not replicated; this project compares from the explicit reviewed/accepted SHA;
-- multi-generation `FAIL H1 -> FAIL H2 -> repair H3` checkpoint chaining is not yet supported by the unified re-review bundle.
+- no prior-self-comment echo suppression because top-level reviewer conversation is deliberately not ingested as review input;
+- the exact `base -> PR net diff` plus path-narrowing algorithm used there is not replicated; this project compares from an explicit reviewed/accepted or failed-reviewed SHA.
 
-## SamuelCabralCruz/unresolved-review-threads — relevant subset: about 90% covered
+These are not current correctness blockers for the chosen architecture.
+
+## SamuelCabralCruz/unresolved-review-threads — relevant subset: about 95% covered
 
 Covered:
 
@@ -104,13 +110,17 @@ Covered:
 - resolved/unresolved distinction;
 - outdated unresolved threads separated from current unresolved threads;
 - current unresolved threads act as blockers;
-- pagination exhaustion now fails closed.
+- paginated review-thread retrieval;
+- V1.11 re-review continuity for current unresolved/non-outdated threads;
+- up to 100 comments per thread carried as bounded untrusted evidence;
+- nested comment overflow and thread pagination exhaustion fail closed.
 
 Deliberately excluded:
 
 - labels;
 - commit-status mutation;
-- merge enforcement as an actuator.
+- merge enforcement as an actuator;
+- automatic thread resolution.
 
 ## GitHub CLI (`cli/cli`) — data concepts covered; transport backend intentionally absent
 
@@ -122,12 +132,15 @@ PR/review/status/policy data concepts are covered. `gh` transport parity remains
 
 These were evaluated as ecosystem references but are not target architectures. Rule-engine automation, external approval-policy authority and static-finding actuation would broaden this tool beyond its deterministic read-only evidence boundary.
 
-## Cross-cutting remaining work after V1.10
+## Cross-cutting remaining work after V1.11
 
-Highest-value real gaps:
+The two correctness/efficiency gaps identified after V1.10 are now covered:
 
-1. **Re-review thread continuity** — carry current unresolved/non-outdated review threads into bounded re-review evidence where they affect the repaired scope.
-2. **Multi-generation failed-review chaining** — allow a validated incremental FAIL to become the next bounded checkpoint without forcing a new full review, subject to strict continuity rules.
+1. **Re-review thread continuity** — current unresolved/non-outdated review threads are carried into bounded re-review evidence with an explicit untrusted-content boundary and fail-closed comment/thread pagination handling.
+2. **Multi-generation failed-review chaining** — a validated incremental FAIL can become the next bounded checkpoint while the accepted semantic baseline remains unchanged and unresolved finding lineage is preserved.
+
+The remaining optional engineering item is:
+
 3. **Optional `gh` transport** — convenience backend for local use, not correctness-critical.
 
 Top-level issue comments, deployment dashboards, notifications, persistence as authority, auto-resolve, auto-approve and auto-merge remain non-goals unless a future consumer demonstrates a concrete need.

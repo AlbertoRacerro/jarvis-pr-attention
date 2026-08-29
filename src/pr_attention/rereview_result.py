@@ -4,7 +4,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from .rereview_packet import REREVIEW_PACKET_KIND, rereview_packet_sha256
+from .rereview_packet import MAX_REREVIEW_GENERATIONS, REREVIEW_PACKET_KIND, rereview_packet_sha256
 
 REREVIEW_RESULT_SCHEMA_VERSION = 1
 REREVIEW_VALIDATION_SCHEMA_VERSION = 1
@@ -91,6 +91,10 @@ def _strict_positive_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+def _strict_nonnegative_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def _paths(items: Any, label: str, reasons: list[str]) -> list[str]:
     if not isinstance(items, list):
         reasons.append(f"{label} must be a list")
@@ -104,6 +108,134 @@ def _paths(items: Any, label: str, reasons: list[str]) -> list[str]:
     if len(values) != len(set(values)):
         reasons.append(f"{label} contains duplicate paths")
     return values
+
+
+def _validate_v11_lineage_and_threads(packet: dict[str, Any], reasons: list[str], *, complete: Any) -> None:
+    source_kind = packet.get("source_checkpoint_kind")
+    if source_kind is None:
+        return
+    if source_kind not in {"FULL_REVIEW_FAIL", "REREVIEW_FAIL"}:
+        reasons.append("re-review packet source_checkpoint_kind is invalid")
+
+    accepted = packet.get("accepted_head_sha")
+    baseline = packet.get("accepted_semantic_baseline_sha")
+    if not _valid_sha(baseline) or baseline != accepted:
+        reasons.append("re-review packet accepted semantic baseline must equal accepted_head_sha")
+
+    previous = packet.get("previous_reviewed_head_sha")
+    failed_checkpoint = packet.get("failed_reviewed_checkpoint_sha")
+    if not _valid_sha(failed_checkpoint) or failed_checkpoint != previous:
+        reasons.append("re-review packet failed reviewed checkpoint must equal previous_reviewed_head_sha")
+
+    generation = packet.get("lineage_generation")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+        or generation > MAX_REREVIEW_GENERATIONS
+    ):
+        reasons.append("re-review packet lineage_generation is invalid")
+
+    latest = packet.get("latest_rereview_checkpoint_sha")
+    if source_kind == "FULL_REVIEW_FAIL" and latest is not None:
+        reasons.append("full-review FAIL source must not claim a previous re-review checkpoint")
+    if source_kind == "REREVIEW_FAIL" and (not _valid_sha(latest) or latest != previous):
+        reasons.append("re-review FAIL source must bind latest_rereview_checkpoint_sha to previous reviewed head")
+
+    prior_findings = packet.get("prior_blocking_findings")
+    unresolved_lineage = packet.get("unresolved_finding_lineage")
+    if unresolved_lineage != prior_findings:
+        reasons.append("unresolved_finding_lineage must exactly match active prior blocking findings")
+    if isinstance(prior_findings, list) and isinstance(generation, int) and not isinstance(generation, bool):
+        for finding in prior_findings:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = finding.get("id") or "<unknown>"
+            first_seen = finding.get("first_seen_head_sha")
+            last_failed = finding.get("last_failed_head_sha")
+            finding_generation = finding.get("lineage_generation")
+            if not _valid_sha(first_seen):
+                reasons.append(f"prior finding {finding_id} first_seen_head_sha is invalid")
+            if not _valid_sha(last_failed):
+                reasons.append(f"prior finding {finding_id} last_failed_head_sha is invalid")
+            if (
+                not isinstance(finding_generation, int)
+                or isinstance(finding_generation, bool)
+                or finding_generation < 0
+                or finding_generation >= generation
+            ):
+                reasons.append(f"prior finding {finding_id} lineage_generation is invalid")
+
+    thread_total_budget = _strict_positive_int(packet.get("max_total_thread_bytes"))
+    thread_body_budget = _strict_positive_int(packet.get("max_thread_body_bytes"))
+    included_thread_bytes = _strict_nonnegative_int(packet.get("included_thread_bytes"))
+    if thread_total_budget is None or thread_body_budget is None:
+        reasons.append("re-review packet thread budgets must be positive integers")
+    elif thread_body_budget > thread_total_budget:
+        reasons.append("re-review packet per-thread body budget exceeds total thread budget")
+    if included_thread_bytes is None:
+        reasons.append("re-review packet included_thread_bytes is invalid")
+    elif thread_total_budget is not None and included_thread_bytes > thread_total_budget:
+        reasons.append("re-review packet included_thread_bytes exceeds total thread budget")
+
+    thread_coverage = packet.get("review_thread_coverage")
+    if thread_coverage not in {"COMPLETE", "PARTIAL", "UNKNOWN"}:
+        reasons.append("re-review packet review_thread_coverage is invalid")
+    if complete is True and thread_coverage != "COMPLETE":
+        reasons.append("complete re-review packet requires COMPLETE review-thread coverage")
+
+    threads = packet.get("review_threads")
+    if not isinstance(threads, list):
+        reasons.append("re-review packet review_threads must be a list")
+        threads = []
+    thread_ids: list[str] = []
+    observed_thread_bytes = 0
+    for thread in threads:
+        if not isinstance(thread, dict):
+            reasons.append("review_threads contains an invalid entry")
+            continue
+        thread_id = thread.get("id")
+        path = thread.get("path")
+        author = thread.get("author")
+        body = thread.get("body")
+        original_bytes = _strict_nonnegative_int(thread.get("original_body_bytes"))
+        included_bytes = _strict_nonnegative_int(thread.get("included_body_bytes"))
+        truncated = thread.get("truncated")
+        if not isinstance(thread_id, str) or not thread_id:
+            reasons.append("review thread requires a non-empty id")
+        else:
+            thread_ids.append(thread_id)
+        if path is not None and (not isinstance(path, str) or not path):
+            reasons.append(f"review thread {thread_id or '<unknown>'} path is invalid")
+        if author is not None and (not isinstance(author, str) or not author):
+            reasons.append(f"review thread {thread_id or '<unknown>'} author is invalid")
+        if not isinstance(body, str):
+            reasons.append(f"review thread {thread_id or '<unknown>'} body is invalid")
+            body_bytes = None
+        else:
+            body_bytes = len(body.encode("utf-8"))
+        if original_bytes is None or included_bytes is None:
+            reasons.append(f"review thread {thread_id or '<unknown>'} byte accounting is invalid")
+        else:
+            observed_thread_bytes += included_bytes
+            if body_bytes is not None and included_bytes != body_bytes:
+                reasons.append(f"review thread {thread_id or '<unknown>'} included byte count does not match body")
+            if original_bytes < included_bytes:
+                reasons.append(f"review thread {thread_id or '<unknown>'} original bytes are smaller than included bytes")
+            if thread_body_budget is not None and included_bytes > thread_body_budget:
+                reasons.append(f"review thread {thread_id or '<unknown>'} exceeds per-thread body budget")
+        if not isinstance(truncated, bool):
+            reasons.append(f"review thread {thread_id or '<unknown>'} truncated flag is invalid")
+        elif original_bytes is not None and included_bytes is not None and truncated is not (included_bytes < original_bytes):
+            reasons.append(f"review thread {thread_id or '<unknown>'} truncated flag is inconsistent with byte counts")
+        if thread.get("content_trust") != "UNTRUSTED_REPOSITORY_CONTENT":
+            reasons.append(f"review thread {thread_id or '<unknown>'} content trust marker is invalid")
+    if len(thread_ids) != len(set(thread_ids)):
+        reasons.append("review thread IDs must be unique")
+    if included_thread_bytes is not None and observed_thread_bytes != included_thread_bytes:
+        reasons.append("included_thread_bytes does not equal the sum of included review-thread bodies")
+    if thread_coverage == "COMPLETE" and any(isinstance(item, dict) and item.get("truncated") is True for item in threads):
+        reasons.append("COMPLETE review-thread coverage cannot contain truncated thread evidence")
 
 
 def _validate_packet_shape(packet: dict[str, Any]) -> None:
@@ -193,6 +325,8 @@ def _validate_packet_shape(packet: dict[str, Any]) -> None:
                 reasons.append(f"complete re-review packet lacks prior context for finding {finding_id or '<unknown>'}")
     if len(finding_ids) != len(set(finding_ids)):
         reasons.append("prior blocking finding IDs must be unique")
+
+    _validate_v11_lineage_and_threads(packet, reasons, complete=complete)
     if reasons:
         raise ValueError("; ".join(reasons))
 
