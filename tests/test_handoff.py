@@ -106,6 +106,12 @@ class HandoffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_review_envelope(p, reviewer_name="reviewer")
 
+    def test_boolean_schema_version_is_rejected(self):
+        p = packet()
+        p["schema_version"] = True
+        with self.assertRaises(ValueError):
+            build_review_envelope(p, reviewer_name="reviewer")
+
     def test_template_digest_changes_with_patch_change(self):
         first = packet()
         second = copy.deepcopy(first)
