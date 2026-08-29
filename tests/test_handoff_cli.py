@@ -75,8 +75,10 @@ class HandoffCLITests(unittest.TestCase):
             with open(output_path, encoding="utf-8") as handle:
                 envelope = json.load(handle)
             self.assertEqual(envelope["packet_sha256"], packet_sha256(p))
-            self.assertEqual(envelope["packet"], p)
-            self.assertEqual(envelope["review_result_template"]["reviewer"]["name"], "Claude")
+            self.assertEqual(envelope["control_plane"]["trust"], "TOOL_GENERATED_CONTROL_DATA")
+            self.assertEqual(envelope["untrusted_evidence"]["packet"], p)
+            self.assertEqual(envelope["untrusted_evidence"]["content_trust"], "UNTRUSTED_REPOSITORY_CONTENT")
+            self.assertEqual(envelope["control_plane"]["review_result_template"]["reviewer"]["name"], "Claude")
 
     def test_prefill_reviewed_files_is_explicit(self):
         p = packet()
