@@ -221,7 +221,7 @@ runs:
           bundle_args+=(--packet-file "$packet_out" --envelope-file "$envelope_out")
         fi
         if [[ -n "$validation_out" ]]; then
-          bundle_args+=(--validation-file "$validation_out" --integration-gate-file "$integration_gate_out")
+          bundle_args+=(--review-result-file "$REVIEW_RESULT_FILE" --validation-file "$validation_out" --integration-gate-file "$integration_gate_out")
         fi
         python3 -m pr_attention.bundle_cli "${bundle_args[@]}" >/dev/null
         readarray -t bundle_values < <(python3 - "$bundle_out" <<'PY'
