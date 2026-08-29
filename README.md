@@ -1,8 +1,8 @@
 # jarvis-pr-attention
 
-Deterministic exact-head PR attention snapshots, incremental review plans, and bounded delta review packets for agentic software delivery.
+Deterministic exact-head PR attention snapshots, incremental review plans, bounded delta review packets, and structured review-result validation for agentic software delivery.
 
-`jarvis-pr-attention` is a small, read-only GitHub fact collector. It turns live pull-request state into a machine-readable snapshot and a compact human summary without using an LLM and without becoming a second source of truth.
+`jarvis-pr-attention` is a small, read-only GitHub fact collector. It turns live pull-request state into machine-readable evidence without using an LLM and without becoming a second source of truth.
 
 ## Design
 
@@ -16,10 +16,11 @@ Deterministic exact-head PR attention snapshots, incremental review plans, and b
 - An optional previously accepted semantic head can be supplied explicitly; the tool never guesses one.
 - Accepted-head evidence is reused only when GitHub proves the accepted head is the current head or an ancestor of it.
 - Diverged/behind baselines and incomplete large compare results fail closed to full review.
+- Reviewer-produced results are treated as claims and are accepted only when they bind exactly to the packet/head they reviewed.
 
 ## CLI
 
-Requires Python 3.11+ and `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository.
+Requires Python 3.11+. GitHub-reading commands require `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository. Packet digesting and non-live review-result validation work offline.
 
 ```bash
 PYTHONPATH=src python -m pr_attention snapshot owner/repo 123
@@ -78,7 +79,7 @@ For ordinary descendant repairs, unchanged semantic evidence remains reusable an
 
 ## Bounded review packets
 
-V0.3 adds a reviewer-facing packet that contains the exact patch evidence for the validated `accepted-head...current-head` delta without invoking any model:
+A reviewer-facing packet contains the exact patch evidence for the validated `accepted-head...current-head` delta without invoking any model:
 
 ```bash
 PYTHONPATH=src python -m pr_attention review-packet owner/repo 123 \
@@ -101,9 +102,39 @@ Every packet carries `content_trust: UNTRUSTED_REPOSITORY_CONTENT`. **Patch text
 
 Review-packet exit codes are `0=COMPLETE`, `50=PARTIAL`, `60=NONE`, `70=UNKNOWN/retrieval failure`. Use `--no-coverage-exit` for orchestration that consumes coverage from JSON instead.
 
+## Structured review results
+
+V0.4 adds a deterministic contract for the result produced by an external semantic reviewer such as ChatGPT, Claude, GLM, or a human review service. `jarvis-pr-attention` still does not perform the review itself.
+
+Compute the stable identity of a packet:
+
+```bash
+PYTHONPATH=src python -m pr_attention packet-digest packet.json
+```
+
+Then validate a reviewer-produced JSON result offline:
+
+```bash
+PYTHONPATH=src python -m pr_attention validate-review-result \
+  packet.json review-result.json --json
+```
+
+Or bind it to the current GitHub PR head as well:
+
+```bash
+GITHUB_TOKEN=... PYTHONPATH=src python -m pr_attention validate-review-result \
+  packet.json review-result.json --live --json
+```
+
+Validation statuses are `VALID_PASS`, `VALID_FAIL`, `VALID_NEEDS_HUMAN`, `STALE`, and `INVALID`. A `PASS` is accepted only for a complete non-stale packet, exact packet digest/head bindings, every packet file declared reviewed, and zero blocking findings. `P0`, `P1`, and `P2` findings cannot be disguised as non-blocking.
+
+The packet digest deliberately excludes transient fields such as generation time and current CI attention, so an unchanged reviewed code delta retains the same identity while gates move from pending to green. Any change to the actual packet evidence changes the digest.
+
+See [docs/REVIEW_RESULT_CONTRACT.md](docs/REVIEW_RESULT_CONTRACT.md) for the exact JSON schema, finding rules, validation semantics, and exit codes.
+
 ## Snapshot fields
 
-The schema includes:
+The snapshot schema includes:
 
 - exact initial and final head SHA;
 - scope (`additions`, `deletions`, `changed_files`);
@@ -135,9 +166,12 @@ steps:
       echo "attention=${{ steps.attention.outputs.attention }}"
       echo "next=${{ steps.attention.outputs.next-action-class }}"
       echo "scope=${{ steps.attention.outputs.review-scope }}"
+      echo "packet=${{ steps.attention.outputs.packet-sha256 }}"
 ```
 
-Action outputs include `attention`, `head-sha`, `next-action-class`, `review-scope`, `delta-files`, `snapshot-file`, `review-packet-file`, `packet-coverage`, `packet-complete`, and `packet-patch-bytes`. When `accepted-head` is supplied, the Action emits both the snapshot and the bounded review packet.
+Action outputs include `attention`, `head-sha`, `next-action-class`, `review-scope`, `delta-files`, `snapshot-file`, `review-packet-file`, `packet-coverage`, `packet-complete`, `packet-patch-bytes`, and `packet-sha256`.
+
+If `review-result-file` is supplied, the Action regenerates the packet, validates the structured result against it and the live PR head, then emits `review-result-status`, `review-result-valid`, and `review-result-validation-file`. These remain evidence only; the Action never approves or merges.
 
 Pin the action to an exact commit SHA in production consumers.
 
