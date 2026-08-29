@@ -3,6 +3,7 @@ import unittest
 import pr_attention
 from pr_attention.models import (
     CheckSummary,
+    DeltaFile,
     DeltaSummary,
     MergeSummary,
     ReviewSummary,
@@ -16,7 +17,7 @@ BASE = "a" * 40
 HEAD = "b" * 40
 
 
-def snapshot(scope="DELTA", *, complete=True, relation="AHEAD"):
+def snapshot(scope="DELTA", *, complete=True, relation="AHEAD", paths=("a.py",)):
     return Snapshot(
         schema_version=2,
         repository="o/r",
@@ -38,6 +39,7 @@ def snapshot(scope="DELTA", *, complete=True, relation="AHEAD"):
             acceptance_validity="REUSABLE_FOR_UNCHANGED" if relation == "AHEAD" else "CURRENT",
             review_scope=scope,
             complete=complete,
+            files=[DeltaFile(path=path, status="modified") for path in paths] if scope == "DELTA" else [],
         ),
         attention="READY",
         next_action_class="REVIEW_DELTA" if scope == "DELTA" else ("MERGE_CANDIDATE" if scope == "NONE" else "FULL_REVIEW"),
@@ -70,14 +72,14 @@ class PacketTests(unittest.TestCase):
         self.assertIs(pr_attention.collect_review_packet, collect_review_packet)
 
     def test_complete_packet_contains_all_patches(self):
-        packet = build_review_packet(snapshot(), compare([("b.py", "+b"), ("a.py", "+a")]))
+        packet = build_review_packet(snapshot(paths=("a.py", "b.py")), compare([("b.py", "+b"), ("a.py", "+a")]))
         self.assertTrue(packet.complete)
         self.assertEqual(packet.coverage, "COMPLETE")
         self.assertEqual([item.path for item in packet.files], ["a.py", "b.py"])
         self.assertEqual(packet.content_trust, CONTENT_TRUST)
 
     def test_missing_patch_is_partial(self):
-        packet = build_review_packet(snapshot(), compare([("a.py", "+a"), ("blob.bin", None)]))
+        packet = build_review_packet(snapshot(paths=("a.py", "blob.bin")), compare([("a.py", "+a"), ("blob.bin", None)]))
         self.assertFalse(packet.complete)
         self.assertEqual(packet.coverage, "PARTIAL")
         self.assertEqual(packet.files[1].omission_reason, "patch-unavailable")
@@ -90,7 +92,7 @@ class PacketTests(unittest.TestCase):
 
     def test_total_budget_never_exceeded(self):
         packet = build_review_packet(
-            snapshot(),
+            snapshot(paths=("a.py", "b.py")),
             compare([("a.py", "a" * 10), ("b.py", "b" * 10)]),
             max_total_patch_bytes=12,
             max_file_patch_bytes=10,
@@ -109,6 +111,14 @@ class PacketTests(unittest.TestCase):
     def test_head_move_invalidates_packet(self):
         packet = build_review_packet(snapshot(), compare([("a.py", "+a")]), final_head_sha="c" * 40)
         self.assertEqual((packet.coverage, packet.attention, packet.next_action_class), ("UNKNOWN", "STALE", "REFRESH_SNAPSHOT"))
+
+    def test_expected_head_mismatch_forces_refresh(self):
+        packet = build_review_packet(snapshot(), compare([("a.py", "+a")]), expected_head_sha="c" * 40)
+        self.assertEqual((packet.coverage, packet.attention, packet.next_action_class), ("UNKNOWN", "STALE", "REFRESH_SNAPSHOT"))
+
+    def test_second_compare_file_set_mismatch_is_unknown(self):
+        packet = build_review_packet(snapshot(), compare([("other.py", "+x")]))
+        self.assertEqual((packet.coverage, packet.complete, packet.next_action_class), ("UNKNOWN", False, "INVESTIGATE_UNKNOWN"))
 
     def test_invalid_budget_rejected(self):
         with self.assertRaises(ValueError):
