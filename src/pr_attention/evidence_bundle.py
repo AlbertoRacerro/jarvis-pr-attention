@@ -6,6 +6,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .handoff import build_review_envelope
+from .integration_gate import build_integration_gate
 from .review_result import packet_sha256, validate_review_result
 
 BUNDLE_SCHEMA_VERSION = 1
@@ -126,6 +128,20 @@ def _control_from_envelope(envelope: dict[str, Any], packet: dict[str, Any], dig
     expected = {"repository": packet["repository"], "pr_number": packet["pr_number"], "accepted_head_sha": packet["accepted_head_sha"], "head_sha": packet["head_sha"], "packet_sha256": digest}
     if any(template.get(key) != value for key, value in expected.items()):
         raise ValueError("review result template binding does not match packet")
+
+    reviewer = template.get("reviewer")
+    if not isinstance(reviewer, dict) or not isinstance(reviewer.get("name"), str) or not reviewer["name"].strip():
+        raise ValueError("review envelope reviewer identity is invalid")
+    model = reviewer.get("model")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError("review envelope reviewer model is invalid")
+    rebuilt = build_review_envelope(
+        packet,
+        reviewer_name=reviewer["name"],
+        reviewer_model=model,
+    )
+    if rebuilt != envelope:
+        raise ValueError("review envelope does not match deterministic control-plane contract")
     return control
 
 
@@ -148,6 +164,9 @@ def _require_gate(gate: dict[str, Any], snapshot: dict[str, Any], validation: di
         raise ValueError("integration gate status binding does not match evidence")
     if gate.get("merge_ready") is not (status == "READY_TO_MERGE"):
         raise ValueError("integration gate merge_ready is inconsistent")
+    rebuilt = build_integration_gate(snapshot, validation).to_dict()
+    if rebuilt != gate:
+        raise ValueError("integration gate does not match deterministic gate evaluation")
 
 
 def _phase(packet: Any, control: Any, validation: Any, gate: Any) -> str:
