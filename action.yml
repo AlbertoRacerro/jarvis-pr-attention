@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate deterministic exact-head PR attention, review packets, reviewer handoff artifacts, and result validation"
+description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, and an advisory integration gate"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -45,7 +45,7 @@ outputs:
     description: "Exact head SHA the snapshot was collected for"
     value: ${{ steps.snapshot.outputs.head-sha }}
   next-action-class:
-    description: "Deterministic next action class"
+    description: "Deterministic next action class before semantic-review completion"
     value: ${{ steps.snapshot.outputs.next-action-class }}
   review-scope:
     description: "NONE, DELTA, FULL or UNKNOWN"
@@ -75,7 +75,7 @@ outputs:
     description: "Path to reviewer-result JSON template bound to the packet"
     value: ${{ steps.snapshot.outputs.review-result-template-file }}
   review-envelope-file:
-    description: "Path to deterministic reviewer handoff envelope containing contract plus untrusted packet evidence"
+    description: "Path to deterministic reviewer handoff envelope containing control plane plus untrusted evidence"
     value: ${{ steps.snapshot.outputs.review-envelope-file }}
   review-result-status:
     description: "NOT_RUN, VALID_PASS, VALID_FAIL, VALID_NEEDS_HUMAN, STALE or INVALID"
@@ -86,6 +86,15 @@ outputs:
   review-result-validation-file:
     description: "Path to JSON review result validation; empty when review-result-file is not supplied"
     value: ${{ steps.snapshot.outputs.review-result-validation-file }}
+  integration-gate-status:
+    description: "NOT_RUN, READY_TO_MERGE, WAIT_FOR_GATES, REPAIR, REVIEW_REQUIRED, NEEDS_HUMAN, VERIFY_LIVE, STALE or UNKNOWN"
+    value: ${{ steps.snapshot.outputs.integration-gate-status }}
+  integration-merge-ready:
+    description: "true only for advisory READY_TO_MERGE; exact-head merge guard is still required"
+    value: ${{ steps.snapshot.outputs.integration-merge-ready }}
+  integration-gate-file:
+    description: "Path to JSON integration gate; empty when review-result-file is not supplied"
+    value: ${{ steps.snapshot.outputs.integration-gate-file }}
 runs:
   using: "composite"
   steps:
@@ -161,6 +170,9 @@ runs:
         validation_out=""
         review_result_status="NOT_RUN"
         review_result_valid="false"
+        integration_gate_out=""
+        integration_gate_status="NOT_RUN"
+        integration_merge_ready="false"
         if [[ -n "$REVIEW_RESULT_FILE" ]]; then
           if [[ -z "$packet_out" ]]; then
             echo "review-result-file requires accepted-head so a review packet can be generated" >&2
@@ -179,11 +191,25 @@ runs:
           )
           review_result_status="${validation_values[0]}"
           review_result_valid="${validation_values[1]}"
+
+          integration_gate_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-integration-gate.json"
+          python3 -m pr_attention integration-gate "$out" "$validation_out" \
+            --output "$integration_gate_out" --no-gate-exit >/dev/null
+          readarray -t integration_values < <(python3 - "$integration_gate_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            gate = json.load(handle)
+        print(gate["status"])
+        print(str(gate["merge_ready"]).lower())
+        PY
+          )
+          integration_gate_status="${integration_values[0]}"
+          integration_merge_ready="${integration_values[1]}"
         fi
 
-        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$template_out" "$envelope_out" "$validation_out" "$review_result_status" "$review_result_valid" <<'PY'
+        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$template_out" "$envelope_out" "$validation_out" "$review_result_status" "$review_result_valid" "$integration_gate_out" "$integration_gate_status" "$integration_merge_ready" <<'PY'
         import json, sys
-        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, template_path, envelope_path, validation_path, result_status, result_valid = sys.argv[1:]
+        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, template_path, envelope_path, validation_path, result_status, result_valid, integration_path, integration_status, integration_ready = sys.argv[1:]
         with open(path, encoding="utf-8") as handle:
             snapshot = json.load(handle)
         values = {
@@ -203,6 +229,9 @@ runs:
             "review-result-status": result_status,
             "review-result-valid": result_valid,
             "review-result-validation-file": validation_path,
+            "integration-gate-file": integration_path,
+            "integration-gate-status": integration_status,
+            "integration-merge-ready": integration_ready,
         }
         with open(output, "a", encoding="utf-8") as handle:
             for key, value in values.items():
