@@ -9,6 +9,7 @@ from .continuity import (
     build_lineage_rereview_packet,
     failed_checkpoint_from_evidence_bundle,
     failed_checkpoint_from_rereview_bundle as _core_failed_checkpoint_from_rereview_bundle,
+    lineage_packet_sha256,
     validate_lineage_result as _core_validate_lineage_result,
 )
 from .github import GitHubClient, GitHubError
@@ -91,6 +92,14 @@ def collect_lineage_rereview_packet(
     )
 
 
+def _gate_compatible(validation: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(validation)
+    payload["kind"] = "PR_ATTENTION_REREVIEW_VALIDATION"
+    payload["previous_reviewed_head_sha"] = packet.get("previous_failed_checkpoint_sha")
+    payload["rereview_packet_sha256"] = lineage_packet_sha256(packet)
+    return payload
+
+
 def validate_lineage_result(
     packet: dict[str, Any],
     result: dict[str, Any],
@@ -100,7 +109,7 @@ def validate_lineage_result(
     """Do not let an incompletely reviewed PASS or FAIL advance semantic authority/lineage."""
     validation = _core_validate_lineage_result(packet, result, live_head_sha=live_head_sha)
     if not validation.get("valid") or result.get("verdict") not in {"PASS", "FAIL"}:
-        return validation
+        return _gate_compatible(validation, packet)
 
     reasons: list[str] = []
     if (
@@ -120,13 +129,12 @@ def validate_lineage_result(
     if not isinstance(reviewed, list) or set(reviewed) != delta_paths:
         reasons.append(f"{result['verdict']} requires every repair-delta file to be reviewed")
 
-    if not reasons:
-        return validation
-    guarded = dict(validation)
-    guarded.update(
-        valid=False,
-        status="INVALID",
-        next_failed_checkpoint=None,
-        reasons=reasons,
-    )
-    return guarded
+    if reasons:
+        validation = dict(validation)
+        validation.update(
+            valid=False,
+            status="INVALID",
+            next_failed_checkpoint=None,
+            reasons=reasons,
+        )
+    return _gate_compatible(validation, packet)
