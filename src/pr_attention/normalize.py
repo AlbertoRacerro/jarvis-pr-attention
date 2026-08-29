@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any, Iterable
 
-from .models import CheckSummary, ReviewSummary, ThreadSummary
+from .models import CheckSummary, DeltaFile, DeltaSummary, ReviewSummary, ThreadSummary
 
 _SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
 _PENDING_STATUSES = {"queued", "in_progress", "pending", "requested", "waiting", "expected"}
@@ -164,3 +164,142 @@ def normalize_threads(nodes: list[dict[str, Any]]) -> ThreadSummary:
         resolved=resolved,
         unresolved_current_items=unresolved_current_items,
     )
+
+
+def normalize_delta(
+    accepted_head_sha: str | None,
+    head_sha: str,
+    compare_payload: dict[str, Any] | None,
+) -> DeltaSummary:
+    if not accepted_head_sha:
+        return DeltaSummary(
+            accepted_head_sha=None,
+            relation="ABSENT",
+            acceptance_validity="ABSENT",
+            review_scope="FULL",
+            complete=True,
+            reasons=["no previously accepted semantic head was supplied"],
+        )
+
+    if accepted_head_sha == head_sha:
+        return DeltaSummary(
+            accepted_head_sha=accepted_head_sha,
+            relation="CURRENT",
+            acceptance_validity="CURRENT",
+            review_scope="NONE",
+            complete=True,
+            reasons=["previously accepted semantic head is the current head"],
+        )
+
+    if not isinstance(compare_payload, dict):
+        return DeltaSummary(
+            accepted_head_sha=accepted_head_sha,
+            relation="UNKNOWN",
+            acceptance_validity="UNKNOWN",
+            review_scope="UNKNOWN",
+            complete=False,
+            reasons=["GitHub compare evidence could not be retrieved"],
+        )
+
+    status = str(compare_payload.get("status") or "").lower()
+    raw_files = compare_payload.get("files")
+    files_available = isinstance(raw_files, list)
+    raw_files = raw_files if files_available else []
+    files = [
+        DeltaFile(
+            path=str(item.get("filename") or ""),
+            status=str(item.get("status") or "unknown"),
+            additions=int(item.get("additions") or 0),
+            deletions=int(item.get("deletions") or 0),
+            changes=int(item.get("changes") or 0),
+            previous_path=(str(item.get("previous_filename")) if item.get("previous_filename") else None),
+        )
+        for item in raw_files
+        if item.get("filename")
+    ]
+    complete = files_available and len(raw_files) < 300
+    additions = sum(item.additions for item in files)
+    deletions = sum(item.deletions for item in files)
+    common = dict(
+        accepted_head_sha=accepted_head_sha,
+        commits_ahead=_optional_int(compare_payload.get("ahead_by")),
+        commits_behind=_optional_int(compare_payload.get("behind_by")),
+        additions=additions,
+        deletions=deletions,
+        changed_files=len(files),
+        files=files,
+    )
+
+    if status == "identical":
+        return DeltaSummary(
+            relation="CURRENT",
+            acceptance_validity="CURRENT",
+            review_scope="NONE",
+            complete=True,
+            reasons=["GitHub reports no delta from the accepted head"],
+            **common,
+        )
+
+    if status == "ahead":
+        if not complete:
+            return DeltaSummary(
+                relation="AHEAD",
+                acceptance_validity="REUSABLE_FOR_UNCHANGED",
+                review_scope="FULL",
+                complete=False,
+                reasons=["accepted head is an ancestor, but GitHub delta file evidence is incomplete; full review is required"],
+                **common,
+            )
+        if not files:
+            return DeltaSummary(
+                relation="AHEAD",
+                acceptance_validity="REUSABLE_FOR_UNCHANGED",
+                review_scope="NONE",
+                complete=True,
+                reasons=["accepted head is an ancestor and the newer commits do not change file content"],
+                **common,
+            )
+        return DeltaSummary(
+            relation="AHEAD",
+            acceptance_validity="REUSABLE_FOR_UNCHANGED",
+            review_scope="DELTA",
+            complete=True,
+            reasons=["accepted head is an ancestor; unchanged evidence remains reusable and only the delta needs semantic review"],
+            **common,
+        )
+
+    if status == "behind":
+        return DeltaSummary(
+            relation="BEHIND",
+            acceptance_validity="INVALID",
+            review_scope="FULL",
+            complete=complete,
+            reasons=["current head is behind the supplied accepted head; prior semantic acceptance cannot authorize this state"],
+            **common,
+        )
+
+    if status == "diverged":
+        return DeltaSummary(
+            relation="DIVERGED",
+            acceptance_validity="INVALID",
+            review_scope="FULL",
+            complete=complete,
+            reasons=["current head diverged from the supplied accepted head; full semantic review is required"],
+            **common,
+        )
+
+    return DeltaSummary(
+        relation="UNKNOWN",
+        acceptance_validity="UNKNOWN",
+        review_scope="UNKNOWN",
+        complete=False,
+        reasons=[f"unrecognized GitHub compare status: {status or 'missing'}"],
+        **common,
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

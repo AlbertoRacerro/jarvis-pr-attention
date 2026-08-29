@@ -27,17 +27,26 @@ jobs:
         uses: ./
         with:
           pr-number: ${{ github.event.pull_request.number }}
-      - name: Verify exact head and normalized state
+          accepted-head: ${{ github.event.pull_request.base.sha }}
+      - name: Verify exact head and incremental review plan
         env:
           SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          REVIEW_SCOPE: ${{ steps.attention.outputs.review-scope }}
+          NEXT_ACTION: ${{ steps.attention.outputs.next-action-class }}
         run: |
           python3 - <<'PY'
           import json, os
           with open(os.environ["SNAPSHOT_FILE"], encoding="utf-8") as handle:
               snapshot = json.load(handle)
+          assert snapshot["schema_version"] == 2
           assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
-          assert snapshot["attention"] in {"READY", "PENDING", "BLOCKED", "UNKNOWN"}
+          assert snapshot["delta"]["accepted_head_sha"] == os.environ["EXPECTED_BASE"]
+          assert snapshot["delta"]["relation"] == "AHEAD"
+          assert snapshot["delta"]["review_scope"] == "DELTA"
+          assert os.environ["REVIEW_SCOPE"] == "DELTA"
+          assert os.environ["NEXT_ACTION"] in {"WAIT_FOR_GATES", "REVIEW_DELTA", "REPAIR", "INVESTIGATE_UNKNOWN"}
           assert snapshot["stale"] is False
           PY

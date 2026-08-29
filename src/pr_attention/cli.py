@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Sequence
 
-from .classify import classify_attention
+from .classify import classify_attention, classify_next_action
 from .github import GitHubClient, GitHubError
 from .models import MergeSummary, ScopeSummary, Snapshot
-from .normalize import normalize_checks, normalize_reviews, normalize_threads
+from .normalize import normalize_checks, normalize_delta, normalize_reviews, normalize_threads
 from .render import render_text
 
 EXIT_CODES = {"READY": 0, "PENDING": 10, "BLOCKED": 20, "STALE": 30, "UNKNOWN": 40}
+_FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
-def collect_snapshot(client: GitHubClient, repo: str, number: int) -> Snapshot:
+def collect_snapshot(client: GitHubClient, repo: str, number: int, *, accepted_head_sha: str | None = None) -> Snapshot:
+    if accepted_head_sha and not _FULL_SHA.fullmatch(accepted_head_sha):
+        raise ValueError("--accepted-head must be a full 40-character hexadecimal commit SHA")
+
     pr = client.pull_request(repo, number)
     head_sha = str(((pr.get("head") or {}).get("sha") or ""))
     if not head_sha:
@@ -34,9 +39,17 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int) -> Snapshot:
         reviews_raw = []
         thread_nodes = []
 
+    compare_payload = None
+    if accepted_head_sha and accepted_head_sha != head_sha:
+        try:
+            compare_payload = client.compare(repo, accepted_head_sha, head_sha)
+        except GitHubError:
+            compare_payload = None
+
     checks = normalize_checks(check_runs, status_contexts)
     reviews = normalize_reviews(reviews_raw, head_sha)
     threads = normalize_threads(thread_nodes)
+    delta = normalize_delta(accepted_head_sha, head_sha, compare_payload)
 
     mergeable = pr.get("mergeable") if isinstance(pr.get("mergeable"), bool) else None
     merge = MergeSummary(
@@ -60,9 +73,10 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int) -> Snapshot:
         merge=merge,
         facts_complete=facts_complete,
     )
+    next_action = classify_next_action(attention, delta)
 
     return Snapshot(
-        schema_version=1,
+        schema_version=2,
         repository=repo,
         pr_number=number,
         title=str(pr.get("title") or ""),
@@ -80,7 +94,9 @@ def collect_snapshot(client: GitHubClient, repo: str, number: int) -> Snapshot:
         reviews=reviews,
         threads=threads,
         merge=merge,
+        delta=delta,
         attention=attention,
+        next_action_class=next_action,
         blockers=blockers,
         pending_reasons=pending,
         facts_complete=facts_complete,
@@ -94,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot = sub.add_parser("snapshot", help="collect one pull request snapshot")
     snapshot.add_argument("repository", help="owner/repository")
     snapshot.add_argument("pr_number", type=int)
+    snapshot.add_argument("--accepted-head", help="last semantically accepted full commit SHA; enables incremental review planning")
     snapshot.add_argument("--json", action="store_true", dest="json_output")
     snapshot.add_argument("--output", help="write JSON snapshot to a file")
     snapshot.add_argument("--no-state-exit", action="store_true", help="always exit 0 after a successful retrieval")
@@ -103,7 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        snapshot = collect_snapshot(GitHubClient.from_env(), args.repository, args.pr_number)
+        snapshot = collect_snapshot(
+            GitHubClient.from_env(),
+            args.repository,
+            args.pr_number,
+            accepted_head_sha=args.accepted_head,
+        )
     except (GitHubError, ValueError) as exc:
         print(f"pr-attention: {exc}", file=sys.stderr)
         return 40

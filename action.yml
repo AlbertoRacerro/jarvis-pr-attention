@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate a deterministic exact-head PR attention snapshot"
+description: "Generate a deterministic exact-head PR attention snapshot and review plan"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -10,9 +10,13 @@ inputs:
     required: false
     default: ${{ github.repository }}
   token:
-    description: "GitHub token with read access to pull requests, checks and statuses"
+    description: "GitHub token with read access to pull requests, checks, statuses and compare data"
     required: false
     default: ${{ github.token }}
+  accepted-head:
+    description: "Last semantically accepted full commit SHA; enables incremental review planning"
+    required: false
+    default: ""
 outputs:
   attention:
     description: "READY, PENDING, BLOCKED, STALE or UNKNOWN"
@@ -20,6 +24,15 @@ outputs:
   head-sha:
     description: "Exact head SHA the snapshot was collected for"
     value: ${{ steps.snapshot.outputs.head-sha }}
+  next-action-class:
+    description: "Deterministic next action class"
+    value: ${{ steps.snapshot.outputs.next-action-class }}
+  review-scope:
+    description: "NONE, DELTA, FULL or UNKNOWN"
+    value: ${{ steps.snapshot.outputs.review-scope }}
+  delta-files:
+    description: "Number of files in the accepted-head to current-head delta"
+    value: ${{ steps.snapshot.outputs.delta-files }}
   snapshot-file:
     description: "Path to the JSON snapshot"
     value: ${{ steps.snapshot.outputs.snapshot-file }}
@@ -31,12 +44,29 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         PYTHONPATH: ${{ github.action_path }}/src
+        ACCEPTED_HEAD: ${{ inputs.accepted-head }}
       run: |
         set -euo pipefail
         out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}.json"
-        python3 -m pr_attention snapshot "${{ inputs.repository }}" "${{ inputs.pr-number }}" --json --output "$out" --no-state-exit >/dev/null
-        attention="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["attention"])' "$out")"
-        head_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["head_sha"])' "$out")"
-        echo "attention=$attention" >> "$GITHUB_OUTPUT"
-        echo "head-sha=$head_sha" >> "$GITHUB_OUTPUT"
-        echo "snapshot-file=$out" >> "$GITHUB_OUTPUT"
+        args=(snapshot "${{ inputs.repository }}" "${{ inputs.pr-number }}" --json --output "$out" --no-state-exit)
+        if [[ -n "$ACCEPTED_HEAD" ]]; then
+          args+=(--accepted-head "$ACCEPTED_HEAD")
+        fi
+        python3 -m pr_attention "${args[@]}" >/dev/null
+        python3 - "$out" "$GITHUB_OUTPUT" <<'PY'
+        import json, sys
+        path, output = sys.argv[1:]
+        with open(path, encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+        values = {
+            "attention": snapshot["attention"],
+            "head-sha": snapshot["head_sha"],
+            "next-action-class": snapshot["next_action_class"],
+            "review-scope": snapshot["delta"]["review_scope"],
+            "delta-files": snapshot["delta"]["changed_files"],
+            "snapshot-file": path,
+        }
+        with open(output, "a", encoding="utf-8") as handle:
+            for key, value in values.items():
+                handle.write(f"{key}={value}\n")
+        PY

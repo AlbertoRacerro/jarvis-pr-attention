@@ -39,7 +39,7 @@ class GitHubClient:
                 "Authorization": f"Bearer {self.token}",
                 "Accept": accept,
                 "X-GitHub-Api-Version": API_VERSION,
-                "User-Agent": "jarvis-pr-attention/0.1",
+                "User-Agent": "jarvis-pr-attention/0.2",
                 "Content-Type": "application/json",
             },
         )
@@ -101,8 +101,22 @@ class GitHubClient:
         return runs
 
     def status_contexts(self, repo: str, head_sha: str) -> list[dict[str, Any]]:
-        payload = self.rest(f"/repos/{repo}/commits/{head_sha}/status?per_page=100")
-        return list((payload or {}).get("statuses") or [])
+        statuses: list[dict[str, Any]] = []
+        for page in range(1, MAX_PAGES + 1):
+            payload = self.rest(f"/repos/{repo}/commits/{head_sha}/status?per_page=100&page={page}")
+            batch = list((payload or {}).get("statuses") or [])
+            statuses.extend(batch)
+            if len(batch) < 100:
+                break
+        return statuses
+
+    def compare(self, repo: str, base_sha: str, head_sha: str) -> dict[str, Any]:
+        base = urllib.parse.quote(base_sha, safe="")
+        head = urllib.parse.quote(head_sha, safe="")
+        payload = self.rest(f"/repos/{repo}/compare/{base}...{head}?per_page=100&page=1")
+        if not isinstance(payload, dict):
+            raise GitHubError("compare response was not an object")
+        return payload
 
     def review_threads(self, repo: str, number: int) -> list[dict[str, Any]]:
         owner, name = repo.split("/", 1)
