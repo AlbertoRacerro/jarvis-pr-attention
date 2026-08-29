@@ -1,0 +1,232 @@
+name: Re-review dogfood
+on:
+  pull_request:
+permissions:
+  contents: read
+  checks: read
+  statuses: read
+  pull-requests: read
+jobs:
+  rereview-action-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: checkpoint
+        name: Build deterministic prior FAIL checkpoint
+        env:
+          PYTHONPATH: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          h1=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          h0=$(git rev-parse "${h1}^")
+          out="${RUNNER_TEMP}/prior-fail-bundle.json"
+          python3 - "$h0" "$h1" "$out" <<'PY'
+          import json, sys
+          from pr_attention.evidence_bundle import build_evidence_bundle
+          from pr_attention.handoff import build_review_envelope
+          from pr_attention.integration_gate import build_integration_gate
+          from pr_attention.review_result import packet_sha256, validate_review_result
+
+          h0, h1, output = sys.argv[1:]
+          snapshot = {
+              "schema_version": 2,
+              "repository": "${{ github.repository }}",
+              "pr_number": ${{ github.event.pull_request.number }},
+              "title": "synthetic prior failed checkpoint",
+              "base_ref": "${{ github.base_ref }}",
+              "head_ref": "synthetic-h1",
+              "head_sha": h1,
+              "final_head_sha": h1,
+              "generated_at": "2026-01-01T00:00:00Z",
+              "scope": {"additions": 1, "deletions": 1, "changed_files": 1},
+              "checks": {"state": "SUCCESS", "total": 1, "passed": ["fixture"], "pending": [], "failed": [], "unknown": []},
+              "reviews": {"state": "NONE", "current_head_approvals": [], "current_head_changes_requested": [], "current_head_commented": [], "stale_review_count": 0, "dismissed_review_count": 0},
+              "threads": {"total": 0, "unresolved_current": 0, "unresolved_outdated": 0, "resolved": 0, "unresolved_current_items": []},
+              "merge": {"mergeable": True, "mergeable_state": "clean", "conflict": False},
+              "delta": {
+                  "accepted_head_sha": h0,
+                  "relation": "AHEAD",
+                  "acceptance_validity": "REUSABLE_FOR_UNCHANGED",
+                  "review_scope": "DELTA",
+                  "complete": True,
+                  "commits_ahead": 1,
+                  "commits_behind": 0,
+                  "additions": 1,
+                  "deletions": 1,
+                  "changed_files": 1,
+                  "files": [{"path": "README.md", "status": "modified", "additions": 1, "deletions": 1, "changes": 2, "previous_path": None}],
+                  "reasons": [],
+              },
+              "attention": "READY",
+              "next_action_class": "REVIEW_DELTA",
+              "blockers": [],
+              "pending_reasons": [],
+              "facts_complete": True,
+              "stale": False,
+          }
+          packet = {
+              "schema_version": 1,
+              "repository": snapshot["repository"],
+              "pr_number": snapshot["pr_number"],
+              "accepted_head_sha": h0,
+              "head_sha": h1,
+              "final_head_sha": h1,
+              "relation": "AHEAD",
+              "review_scope": "DELTA",
+              "content_trust": "UNTRUSTED_REPOSITORY_CONTENT",
+              "coverage": "COMPLETE",
+              "complete": True,
+              "max_total_patch_bytes": 10000,
+              "max_file_patch_bytes": 5000,
+              "included_patch_bytes": 18,
+              "files": [{
+                  "path": "README.md", "status": "modified", "additions": 1, "deletions": 1, "changes": 2,
+                  "previous_path": None, "patch": "@@\n-old\n+broken\n", "original_patch_bytes": 18,
+                  "included_patch_bytes": 18, "truncated": False, "omission_reason": None,
+              }],
+              "reasons": [],
+          }
+          result = {
+              "schema_version": 1,
+              "repository": snapshot["repository"],
+              "pr_number": snapshot["pr_number"],
+              "accepted_head_sha": h0,
+              "head_sha": h1,
+              "packet_sha256": packet_sha256(packet),
+              "reviewer": {"name": "ci-prior-review", "model": "deterministic-fixture"},
+              "verdict": "FAIL",
+              "reviewed_files": ["README.md"],
+              "findings": [{
+                  "id": "F1", "severity": "P1", "blocking": True,
+                  "title": "Synthetic blocker", "detail": "Fixture blocker used only to dogfood H1-to-H2 re-review.",
+                  "path": "README.md", "line": 1,
+              }],
+              "notes": [],
+          }
+          validation = validate_review_result(packet, result, live_head_sha=h1).to_dict()
+          assert validation["status"] == "VALID_FAIL"
+          envelope = build_review_envelope(packet, reviewer_name="ci-prior-review", reviewer_model="deterministic-fixture")
+          gate = build_integration_gate(snapshot, validation).to_dict()
+          assert gate["status"] == "REPAIR"
+          bundle = build_evidence_bundle(snapshot, packet=packet, envelope=envelope, review_result=result, validation=validation, integration_gate=gate)
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(bundle, handle, sort_keys=True, indent=2)
+              handle.write("\n")
+          PY
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "h1=$h1" >> "$GITHUB_OUTPUT"
+      - id: planned
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          max-total-patch-bytes: "1000000"
+          max-file-patch-bytes: "250000"
+          reviewer-name: "ci-rereviewer"
+          reviewer-model: "deterministic-fixture"
+          previous-failed-bundle-file: ${{ steps.checkpoint.outputs.path }}
+      - id: synthetic-rereview
+        name: Complete generated incremental re-review template
+        env:
+          PACKET_FILE: ${{ steps.planned.outputs.rereview-packet-file }}
+          TEMPLATE_FILE: ${{ steps.planned.outputs.rereview-result-template-file }}
+          ENVELOPE_FILE: ${{ steps.planned.outputs.rereview-envelope-file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/synthetic-rereview-result.json"
+          python3 - "$PACKET_FILE" "$TEMPLATE_FILE" "$ENVELOPE_FILE" "$out" <<'PY'
+          import json, sys
+          packet_path, template_path, envelope_path, output = sys.argv[1:]
+          with open(packet_path, encoding="utf-8") as handle:
+              packet = json.load(handle)
+          with open(template_path, encoding="utf-8") as handle:
+              result = json.load(handle)
+          with open(envelope_path, encoding="utf-8") as handle:
+              envelope = json.load(handle)
+          assert packet["incremental_eligible"] is True
+          assert packet["coverage"] == "COMPLETE"
+          assert packet["complete"] is True
+          assert packet["previous_reviewed_head_sha"] == "${{ steps.checkpoint.outputs.h1 }}"
+          assert packet["head_sha"] == "${{ github.event.pull_request.head.sha }}"
+          assert envelope["purpose"] == "SEMANTIC_REREVIEW"
+          assert envelope["control_plane"]["trust"] == "TOOL_GENERATED_CONTROL_DATA"
+          assert envelope["untrusted_evidence"]["content_trust"] == "UNTRUSTED_REPOSITORY_CONTENT"
+          assert envelope["untrusted_evidence"]["packet"] == packet
+          result["verdict"] = "PASS"
+          result["reviewed_files"] = [item["path"] for item in packet["repair_delta_files"]]
+          prior_ids = [item["id"] for item in packet["prior_blocking_findings"]]
+          result["rechecked_finding_ids"] = prior_ids
+          result["resolved_finding_ids"] = prior_ids
+          result["remaining_finding_ids"] = []
+          result["global_invariants_rechecked"] = True
+          result["findings"] = []
+          result["notes"] = ["Synthetic fixture used only for deterministic re-review dogfooding."]
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(result, handle, sort_keys=True, indent=2)
+              handle.write("\n")
+          PY
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+      - id: evaluated
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          max-total-patch-bytes: "1000000"
+          max-file-patch-bytes: "250000"
+          reviewer-name: "ci-rereviewer"
+          reviewer-model: "deterministic-fixture"
+          previous-failed-bundle-file: ${{ steps.checkpoint.outputs.path }}
+          rereview-result-file: ${{ steps.synthetic-rereview.outputs.path }}
+      - name: Verify complete incremental re-review Action cycle
+        env:
+          REREVIEW_MODE: ${{ steps.evaluated.outputs.rereview-mode }}
+          PACKET_FILE: ${{ steps.evaluated.outputs.rereview-packet-file }}
+          ENVELOPE_FILE: ${{ steps.evaluated.outputs.rereview-envelope-file }}
+          VALIDATION_FILE: ${{ steps.evaluated.outputs.rereview-result-validation-file }}
+          GATE_FILE: ${{ steps.evaluated.outputs.rereview-integration-gate-file }}
+          BUNDLE_FILE: ${{ steps.evaluated.outputs.rereview-evidence-bundle-file }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_H1: ${{ steps.checkpoint.outputs.h1 }}
+          RESULT_STATUS: ${{ steps.evaluated.outputs.rereview-result-status }}
+          RESULT_VALID: ${{ steps.evaluated.outputs.rereview-result-valid }}
+          GATE_STATUS: ${{ steps.evaluated.outputs.rereview-integration-gate-status }}
+          BUNDLE_PHASE: ${{ steps.evaluated.outputs.rereview-evidence-bundle-phase }}
+          NEXT_ACTION: ${{ steps.evaluated.outputs.rereview-next-action-class }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python3 - "$PACKET_FILE" "$ENVELOPE_FILE" "$VALIDATION_FILE" "$GATE_FILE" "$BUNDLE_FILE" <<'PY'
+          import json, os, sys
+          from pr_attention.rereview_evidence_bundle import verify_rereview_evidence_bundle
+          packet_path, envelope_path, validation_path, gate_path, bundle_path = sys.argv[1:]
+          with open(packet_path, encoding="utf-8") as handle: packet = json.load(handle)
+          with open(envelope_path, encoding="utf-8") as handle: envelope = json.load(handle)
+          with open(validation_path, encoding="utf-8") as handle: validation = json.load(handle)
+          with open(gate_path, encoding="utf-8") as handle: gate = json.load(handle)
+          with open(bundle_path, encoding="utf-8") as handle: bundle = json.load(handle)
+          assert os.environ["REREVIEW_MODE"] == "true"
+          assert packet["previous_reviewed_head_sha"] == os.environ["EXPECTED_H1"]
+          assert packet["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert packet["final_head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert packet["incremental_eligible"] is True and packet["complete"] is True
+          assert envelope["purpose"] == "SEMANTIC_REREVIEW"
+          assert validation["status"] == "VALID_PASS" and validation["valid"] is True
+          assert validation["live_head_sha"] == os.environ["EXPECTED_HEAD"]
+          expected_gate = {"READY": "READY_TO_MERGE", "PENDING": "WAIT_FOR_GATES", "BLOCKED": "REPAIR", "UNKNOWN": "UNKNOWN"}[bundle["evidence"]["current_snapshot"]["attention"]]
+          assert gate["status"] == expected_gate
+          assert os.environ["GATE_STATUS"] == expected_gate
+          assert os.environ["RESULT_STATUS"] == "VALID_PASS"
+          assert os.environ["RESULT_VALID"] == "true"
+          assert bundle["phase"] == "REREVIEW_INTEGRATION_EVALUATED"
+          assert os.environ["BUNDLE_PHASE"] == "REREVIEW_INTEGRATION_EVALUATED"
+          assert verify_rereview_evidence_bundle(bundle).valid
+          expected_next = {"READY_TO_MERGE": "MERGE_CANDIDATE", "WAIT_FOR_GATES": "WAIT_FOR_GATES", "REPAIR": "REPAIR", "UNKNOWN": "INVESTIGATE_UNKNOWN"}[expected_gate]
+          assert bundle["next_action_class"] == expected_next
+          assert os.environ["NEXT_ACTION"] == expected_next
+          PY
