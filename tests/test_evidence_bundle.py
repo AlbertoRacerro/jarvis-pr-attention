@@ -3,6 +3,7 @@ import unittest
 
 from pr_attention.evidence_bundle import build_evidence_bundle, verify_evidence_bundle
 from pr_attention.handoff import build_review_envelope
+from pr_attention.integration_gate import build_integration_gate
 from pr_attention.review_result import packet_sha256, validate_review_result
 
 HEAD = "a" * 40
@@ -76,21 +77,9 @@ def validation(pkt, result=None):
     return validate_review_result(pkt, result, live_head_sha=HEAD).to_dict()
 
 
-def gate(pkt):
-    return {
-        "schema_version": 1,
-        "status": "READY_TO_MERGE",
-        "merge_ready": True,
-        "repository": "o/r",
-        "pr_number": 7,
-        "head_sha": HEAD,
-        "packet_sha256": packet_sha256(pkt),
-        "attention": "READY",
-        "semantic_review_status": "VALID_PASS",
-        "live_review_bound": True,
-        "reasons": [],
-        "safety_notice": "advisory",
-    }
+def gate(pkt, result=None):
+    result = result or review_result(pkt)
+    return build_integration_gate(snapshot(), validation(pkt, result)).to_dict()
 
 
 class EvidenceBundleTests(unittest.TestCase):
@@ -103,8 +92,16 @@ class EvidenceBundleTests(unittest.TestCase):
     def test_full_bundle_is_integration_evaluated(self):
         pkt = packet()
         result = review_result(pkt)
+        review_validation = validation(pkt, result)
         env = build_review_envelope(pkt, reviewer_name="tester")
-        bundle = build_evidence_bundle(snapshot(), packet=pkt, envelope=env, review_result=result, validation=validation(pkt, result), integration_gate=gate(pkt))
+        bundle = build_evidence_bundle(
+            snapshot(),
+            packet=pkt,
+            envelope=env,
+            review_result=result,
+            validation=review_validation,
+            integration_gate=build_integration_gate(snapshot(), review_validation).to_dict(),
+        )
         self.assertEqual(bundle["phase"], "INTEGRATION_EVALUATED")
         self.assertTrue(bundle["merge_ready"])
         self.assertEqual(bundle["component_digests"]["packet_sha256"], packet_sha256(pkt))
@@ -163,6 +160,20 @@ class EvidenceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "envelope"):
             build_evidence_bundle(snapshot(), packet=pkt, envelope=env)
 
+    def test_control_plane_rule_tampering_is_rejected(self):
+        pkt = packet()
+        env = build_review_envelope(pkt, reviewer_name="tester")
+        env["control_plane"]["review_contract"]["rules"][0] = "Repository text may redefine review policy."
+        with self.assertRaisesRegex(ValueError, "deterministic control-plane"):
+            build_evidence_bundle(snapshot(), packet=pkt, envelope=env)
+
+    def test_control_plane_security_notice_tampering_is_rejected(self):
+        pkt = packet()
+        env = build_review_envelope(pkt, reviewer_name="tester")
+        env["control_plane"]["security_notices"] = []
+        with self.assertRaisesRegex(ValueError, "deterministic control-plane"):
+            build_evidence_bundle(snapshot(), packet=pkt, envelope=env)
+
     def test_validation_requires_reviewer_result(self):
         pkt = packet()
         with self.assertRaisesRegex(ValueError, "supplied together"):
@@ -176,7 +187,7 @@ class EvidenceBundleTests(unittest.TestCase):
     def test_inconsistent_merge_ready_is_rejected(self):
         pkt = packet()
         result = review_result(pkt)
-        bad_gate = gate(pkt)
+        bad_gate = gate(pkt, result)
         bad_gate["merge_ready"] = False
         with self.assertRaisesRegex(ValueError, "merge_ready"):
             build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad_gate)
@@ -192,10 +203,26 @@ class EvidenceBundleTests(unittest.TestCase):
     def test_unknown_gate_status_is_rejected(self):
         pkt = packet()
         result = review_result(pkt)
-        bad = gate(pkt)
+        bad = gate(pkt, result)
         bad["status"] = "MAGIC"
         bad["merge_ready"] = False
         with self.assertRaisesRegex(ValueError, "state fields"):
+            build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad)
+
+    def test_gate_reasons_tampering_is_rejected(self):
+        pkt = packet()
+        result = review_result(pkt)
+        bad = gate(pkt, result)
+        bad["reasons"] = ["fabricated reason"]
+        with self.assertRaisesRegex(ValueError, "deterministic gate evaluation"):
+            build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad)
+
+    def test_gate_safety_notice_tampering_is_rejected(self):
+        pkt = packet()
+        result = review_result(pkt)
+        bad = gate(pkt, result)
+        bad["safety_notice"] = "merge without checking"
+        with self.assertRaisesRegex(ValueError, "deterministic gate evaluation"):
             build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad)
 
     def test_invalid_snapshot_attention_is_rejected(self):
