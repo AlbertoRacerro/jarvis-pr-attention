@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from .classify import classify_attention, classify_next_action
 from .github import GitHubClient, GitHubError
 from .handoff import build_review_envelope, build_review_result_template
+from .integration_gate import build_integration_gate
 from .models import MergeSummary, ScopeSummary, Snapshot
 from .packet import (
     DEFAULT_MAX_FILE_PATCH_BYTES,
@@ -28,6 +29,16 @@ RESULT_EXIT_CODES = {
     "VALID_NEEDS_HUMAN": 81,
     "STALE": 82,
     "INVALID": 83,
+}
+INTEGRATION_EXIT_CODES = {
+    "READY_TO_MERGE": 0,
+    "WAIT_FOR_GATES": 90,
+    "REPAIR": 91,
+    "REVIEW_REQUIRED": 92,
+    "NEEDS_HUMAN": 93,
+    "VERIFY_LIVE": 94,
+    "STALE": 95,
+    "UNKNOWN": 96,
 }
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -165,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
     validation.add_argument("--json", action="store_true", dest="json_output")
     validation.add_argument("--output", help="write JSON validation result to a file")
     validation.add_argument("--no-validation-exit", action="store_true", help="always exit 0 after validation, even for FAIL/STALE/INVALID")
+
+    gate = sub.add_parser("integration-gate", help="combine exact GitHub snapshot evidence with structured semantic-review validation")
+    gate.add_argument("snapshot_file")
+    gate.add_argument("validation_file")
+    gate.add_argument("--output", help="write JSON integration gate to a file")
+    gate.add_argument("--no-gate-exit", action="store_true", help="always exit 0 after computing the integration gate")
     return parser
 
 
@@ -221,6 +238,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _emit_json(review_envelope, args.output)
             return 0
+
+        if args.command == "integration-gate":
+            snapshot_payload = load_json_object(args.snapshot_file)
+            validation_payload = load_json_object(args.validation_file)
+            gate_result = build_integration_gate(snapshot_payload, validation_payload)
+            _emit_json(gate_result.to_dict(), args.output)
+            return 0 if args.no_gate_exit else INTEGRATION_EXIT_CODES[gate_result.status]
 
         if args.command == "validate-review-result":
             packet = load_json_object(args.packet_file)
@@ -280,4 +304,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 40
         if args.command == "review-packet":
             return 70
+        if args.command == "integration-gate":
+            return 96
         return 83
