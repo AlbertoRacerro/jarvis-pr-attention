@@ -5,6 +5,13 @@ from pr_attention.integration_gate import MERGE_SAFETY_NOTICE, build_integration
 
 HEAD = "a" * 40
 DIGEST = "sha256:" + "b" * 64
+VERDICTS = {
+    "VALID_PASS": "PASS",
+    "VALID_FAIL": "FAIL",
+    "VALID_NEEDS_HUMAN": "NEEDS_HUMAN",
+    "STALE": "PASS",
+    "INVALID": "PASS",
+}
 
 
 def snapshot(*, attention="READY", stale=False, facts_complete=True, final_head=HEAD):
@@ -20,7 +27,11 @@ def snapshot(*, attention="READY", stale=False, facts_complete=True, final_head=
     }
 
 
-def validation(*, status="VALID_PASS", valid=True, live_head=HEAD, head=HEAD):
+def validation(*, status="VALID_PASS", valid=None, live_head=HEAD, head=HEAD, verdict=None):
+    if valid is None:
+        valid = status.startswith("VALID_")
+    if verdict is None:
+        verdict = VERDICTS.get(status)
     return {
         "schema_version": 1,
         "valid": valid,
@@ -29,7 +40,7 @@ def validation(*, status="VALID_PASS", valid=True, live_head=HEAD, head=HEAD):
         "pr_number": 4,
         "head_sha": head,
         "packet_sha256": DIGEST,
-        "verdict": "PASS" if status == "VALID_PASS" else None,
+        "verdict": verdict,
         "live_head_sha": live_head,
         "reasons": [],
     }
@@ -53,15 +64,15 @@ class IntegrationGateTests(unittest.TestCase):
         self.assertEqual(gate.status, "REPAIR")
 
     def test_semantic_fail_repairs_even_if_github_ready(self):
-        gate = build_integration_gate(snapshot(), validation(status="VALID_FAIL", valid=True))
+        gate = build_integration_gate(snapshot(), validation(status="VALID_FAIL"))
         self.assertEqual(gate.status, "REPAIR")
 
     def test_needs_human_is_preserved(self):
-        gate = build_integration_gate(snapshot(), validation(status="VALID_NEEDS_HUMAN", valid=True))
+        gate = build_integration_gate(snapshot(), validation(status="VALID_NEEDS_HUMAN"))
         self.assertEqual(gate.status, "NEEDS_HUMAN")
 
     def test_invalid_semantic_result_requires_review(self):
-        gate = build_integration_gate(snapshot(), validation(status="INVALID", valid=False, live_head=None))
+        gate = build_integration_gate(snapshot(), validation(status="INVALID", live_head=None))
         self.assertEqual(gate.status, "REVIEW_REQUIRED")
 
     def test_offline_pass_requires_live_verification(self):
@@ -71,6 +82,14 @@ class IntegrationGateTests(unittest.TestCase):
 
     def test_live_head_move_is_stale(self):
         gate = build_integration_gate(snapshot(), validation(live_head="c" * 40))
+        self.assertEqual(gate.status, "STALE")
+
+    def test_semantic_fail_with_live_head_move_is_stale(self):
+        gate = build_integration_gate(snapshot(), validation(status="VALID_FAIL", live_head="c" * 40))
+        self.assertEqual(gate.status, "STALE")
+
+    def test_needs_human_with_live_head_move_is_stale(self):
+        gate = build_integration_gate(snapshot(), validation(status="VALID_NEEDS_HUMAN", live_head="c" * 40))
         self.assertEqual(gate.status, "STALE")
 
     def test_snapshot_head_move_is_stale(self):
@@ -90,10 +109,34 @@ class IntegrationGateTests(unittest.TestCase):
         self.assertEqual(gate.status, "UNKNOWN")
         self.assertFalse(gate.merge_ready)
 
+    def test_incomplete_github_facts_precede_pending_mapping(self):
+        gate = build_integration_gate(snapshot(attention="PENDING", facts_complete=False), validation())
+        self.assertEqual(gate.status, "UNKNOWN")
+
     def test_invalid_binding_is_unknown(self):
         bad = validation()
         bad["repository"] = "other/repo"
         gate = build_integration_gate(snapshot(), bad)
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_valid_pass_with_valid_false_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(status="VALID_PASS", valid=False))
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_valid_fail_with_pass_verdict_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(status="VALID_FAIL", verdict="PASS"))
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_valid_needs_human_with_fail_verdict_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(status="VALID_NEEDS_HUMAN", verdict="FAIL"))
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_invalid_status_with_valid_true_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(status="INVALID", valid=True))
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_stale_status_with_valid_true_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(status="STALE", valid=True))
         self.assertEqual(gate.status, "UNKNOWN")
 
     def test_boolean_schema_is_rejected(self):
@@ -106,6 +149,10 @@ class IntegrationGateTests(unittest.TestCase):
         review = validation()
         review["pr_number"] = True
         gate = build_integration_gate(snapshot(), review)
+        self.assertEqual(gate.status, "UNKNOWN")
+
+    def test_malformed_live_head_is_unknown(self):
+        gate = build_integration_gate(snapshot(), validation(live_head="not-a-sha"))
         self.assertEqual(gate.status, "UNKNOWN")
 
     def test_input_objects_are_not_mutated(self):
