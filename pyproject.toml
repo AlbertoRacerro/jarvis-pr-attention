@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-pr-attention"
-version = "0.12.0"
+version = "0.13.0"
 description = "Deterministic exact-head PR attention snapshots for agentic software delivery."
 readme = "README.md"
 requires-python = ">=3.11"
