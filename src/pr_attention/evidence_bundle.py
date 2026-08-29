@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .review_result import packet_sha256
+from .review_result import packet_sha256, validate_review_result
 
 BUNDLE_SCHEMA_VERSION = 1
 BUNDLE_KIND = "PR_ATTENTION_EVIDENCE_BUNDLE"
@@ -20,9 +20,8 @@ _ATTENTION = {"READY", "PENDING", "BLOCKED", "STALE", "UNKNOWN"}
 _RELATIONS = {"ABSENT", "CURRENT", "AHEAD", "BEHIND", "DIVERGED", "UNKNOWN"}
 _SCOPES = {"NONE", "DELTA", "FULL", "UNKNOWN"}
 _COVERAGE = {"COMPLETE", "PARTIAL", "NONE", "UNKNOWN"}
-_VALIDATION = {"VALID_PASS", "VALID_FAIL", "VALID_NEEDS_HUMAN", "STALE", "INVALID"}
 _GATE = {"READY_TO_MERGE", "WAIT_FOR_GATES", "REPAIR", "REVIEW_REQUIRED", "NEEDS_HUMAN", "VERIFY_LIVE", "STALE", "UNKNOWN"}
-_EXPECTED_VERDICT = {"VALID_PASS": "PASS", "VALID_FAIL": "FAIL", "VALID_NEEDS_HUMAN": "NEEDS_HUMAN"}
+_NEXT_ACTIONS = {"REFRESH_SNAPSHOT", "INVESTIGATE_UNKNOWN", "REPAIR", "WAIT_FOR_GATES", "FULL_REVIEW", "REVIEW_DELTA", "MERGE_CANDIDATE"}
 _SNAPSHOT_FIELDS = (
     "schema_version", "repository", "pr_number", "title", "base_ref", "head_ref",
     "head_sha", "final_head_sha", "scope", "checks", "reviews", "threads", "merge",
@@ -73,8 +72,12 @@ def _require_snapshot(snapshot: dict[str, Any]) -> tuple[str, int, str, str, dic
         raise ValueError("snapshot repository/pr_number is invalid")
     if not _valid_sha(head) or not _valid_sha(final):
         raise ValueError("snapshot head binding is invalid")
-    if snapshot.get("attention") not in _ATTENTION or not isinstance(snapshot.get("facts_complete"), bool) or not isinstance(snapshot.get("stale"), bool):
-        raise ValueError("snapshot attention/completeness fields are invalid")
+    if snapshot.get("attention") not in _ATTENTION or snapshot.get("next_action_class") not in _NEXT_ACTIONS:
+        raise ValueError("snapshot attention/next_action_class is invalid")
+    if not isinstance(snapshot.get("facts_complete"), bool) or not isinstance(snapshot.get("stale"), bool):
+        raise ValueError("snapshot completeness fields are invalid")
+    if snapshot.get("stale") is not (head != final):
+        raise ValueError("snapshot stale flag is inconsistent with head binding")
     if not isinstance(delta, dict) or delta.get("relation") not in _RELATIONS or delta.get("review_scope") not in _SCOPES:
         raise ValueError("snapshot delta is invalid")
     accepted = delta.get("accepted_head_sha")
@@ -126,21 +129,11 @@ def _control_from_envelope(envelope: dict[str, Any], packet: dict[str, Any], dig
     return control
 
 
-def _require_validation(validation: dict[str, Any], repo: str, number: int, head: str, digest: str) -> None:
-    status, valid, verdict = validation.get("status"), validation.get("valid"), validation.get("verdict")
-    if validation.get("schema_version") != 1 or isinstance(validation.get("schema_version"), bool):
-        raise ValueError("review validation schema_version is invalid")
-    if validation.get("repository") != repo or _pr(validation.get("pr_number")) != number or validation.get("head_sha") != head or validation.get("packet_sha256") != digest:
-        raise ValueError("review validation binding does not match evidence")
-    if status not in _VALIDATION or not isinstance(valid, bool):
-        raise ValueError("review validation status/valid fields are invalid")
-    if status in _EXPECTED_VERDICT and (valid is not True or verdict != _EXPECTED_VERDICT[status]):
-        raise ValueError("review validation verdict is inconsistent with status")
-    if status in {"STALE", "INVALID"} and valid is not False:
-        raise ValueError("stale/invalid review validation requires valid=false")
+def _require_review_result_validation(packet: dict[str, Any], review_result: dict[str, Any], validation: dict[str, Any]) -> None:
     live_head = validation.get("live_head_sha")
-    if live_head is not None and not _valid_sha(live_head):
-        raise ValueError("review validation live_head_sha is invalid")
+    rebuilt = validate_review_result(packet, review_result, live_head_sha=live_head)
+    if rebuilt.to_dict() != validation:
+        raise ValueError("review validation does not match reviewer result and packet")
 
 
 def _require_gate(gate: dict[str, Any], snapshot: dict[str, Any], validation: dict[str, Any], repo: str, number: int, head: str, digest: str) -> None:
@@ -175,10 +168,12 @@ def bundle_sha256(bundle: dict[str, Any]) -> str:
     return _sha(fields)
 
 
-def build_evidence_bundle(snapshot: dict[str, Any], *, packet: dict[str, Any] | None = None, envelope: dict[str, Any] | None = None, validation: dict[str, Any] | None = None, integration_gate: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_evidence_bundle(snapshot: dict[str, Any], *, packet: dict[str, Any] | None = None, envelope: dict[str, Any] | None = None, review_result: dict[str, Any] | None = None, validation: dict[str, Any] | None = None, integration_gate: dict[str, Any] | None = None) -> dict[str, Any]:
     repo, number, head, final, delta = _require_snapshot(snapshot)
-    if packet is None and any(value is not None for value in (envelope, validation, integration_gate)):
+    if packet is None and any(value is not None for value in (envelope, review_result, validation, integration_gate)):
         raise ValueError("review evidence requires a review packet")
+    if (review_result is None) is not (validation is None):
+        raise ValueError("review result and validation must be supplied together")
     if integration_gate is not None and validation is None:
         raise ValueError("integration gate requires review validation")
 
@@ -188,7 +183,9 @@ def build_evidence_bundle(snapshot: dict[str, Any], *, packet: dict[str, Any] | 
     if envelope is not None:
         control = _control_from_envelope(envelope, packet, digest, paths)
     if validation is not None:
-        _require_validation(validation, repo, number, head, digest)
+        _require_review_result_validation(packet, review_result, validation)
+        if validation.get("repository") != repo or _pr(validation.get("pr_number")) != number or validation.get("head_sha") != head or validation.get("packet_sha256") != digest:
+            raise ValueError("review validation binding does not match evidence")
     if integration_gate is not None:
         _require_gate(integration_gate, snapshot, validation, repo, number, head, digest)
 
@@ -213,11 +210,12 @@ def build_evidence_bundle(snapshot: dict[str, Any], *, packet: dict[str, Any] | 
             "snapshot_sha256": snapshot_sha256(snapshot),
             "packet_sha256": digest,
             "review_control_plane_sha256": _sha(control) if control else None,
+            "review_result_sha256": _sha(review_result) if review_result else None,
             "review_validation_sha256": _sha(validation) if validation else None,
             "integration_gate_sha256": _sha(integration_gate) if integration_gate else None,
         },
         "trust": {"bundle": BUNDLE_TRUST, "repository_content": CONTENT_TRUST if packet else None, "digest_notice": DIGEST_NOTICE},
-        "evidence": {"snapshot": snapshot, "review_packet": packet, "review_control_plane": control, "review_validation": validation, "integration_gate": integration_gate},
+        "evidence": {"snapshot": snapshot, "review_packet": packet, "review_control_plane": control, "review_result": review_result, "review_validation": validation, "integration_gate": integration_gate},
     }
     bundle["bundle_sha256"] = bundle_sha256(bundle)
     return bundle
@@ -240,7 +238,14 @@ def verify_evidence_bundle(bundle: dict[str, Any]) -> BundleVerification:
             if not isinstance(packet, dict) or not isinstance(control, dict):
                 raise ValueError("review control plane requires a packet")
             envelope = {"schema_version": 1, "purpose": "SEMANTIC_REVIEW", "packet_sha256": packet_sha256(packet), "control_plane": control, "untrusted_evidence": {"content_trust": CONTENT_TRUST, "packet": packet}}
-        rebuilt = build_evidence_bundle(evidence["snapshot"], packet=packet if isinstance(packet, dict) else None, envelope=envelope, validation=evidence.get("review_validation") if isinstance(evidence.get("review_validation"), dict) else None, integration_gate=evidence.get("integration_gate") if isinstance(evidence.get("integration_gate"), dict) else None)
+        rebuilt = build_evidence_bundle(
+            evidence["snapshot"],
+            packet=packet if isinstance(packet, dict) else None,
+            envelope=envelope,
+            review_result=evidence.get("review_result") if isinstance(evidence.get("review_result"), dict) else None,
+            validation=evidence.get("review_validation") if isinstance(evidence.get("review_validation"), dict) else None,
+            integration_gate=evidence.get("integration_gate") if isinstance(evidence.get("integration_gate"), dict) else None,
+        )
         for key in ("repository", "pr_number", "accepted_head_sha", "head_sha", "final_head_sha", "phase", "attention", "next_action_class", "review_scope", "packet_coverage", "packet_complete", "semantic_review_status", "integration_gate_status", "merge_ready", "component_digests", "trust", "bundle_sha256"):
             if bundle.get(key) != rebuilt.get(key):
                 reasons.append(f"evidence bundle {key} does not match embedded evidence")
