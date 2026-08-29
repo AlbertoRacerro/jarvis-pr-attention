@@ -2,6 +2,7 @@ import unittest
 
 import pr_attention
 from pr_attention.continuity import CONTENT_TRUST, THREAD_TRUST
+from pr_attention.rereview_gate import build_rereview_integration_gate
 
 ACCEPTED = "b" * 40
 H1 = "a" * 40
@@ -67,19 +68,25 @@ def lineage_packet():
     )
 
 
+def fail_result(packet):
+    result = pr_attention.build_lineage_result_template(packet, reviewer_name="reviewer")
+    result.update(
+        verdict="FAIL",
+        reviewed_files=["a.py", "b.py"],
+        considered_thread_ids=[],
+        rechecked_finding_ids=["F1"],
+        resolved_finding_ids=[],
+        remaining_finding_ids=["F1"],
+        global_invariants_rechecked=True,
+    )
+    return result
+
+
 class PublicContinuityGuardTests(unittest.TestCase):
     def test_valid_fail_cannot_advance_when_repair_delta_was_only_partly_reviewed(self):
         packet = lineage_packet()
-        result = pr_attention.build_lineage_result_template(packet, reviewer_name="reviewer")
-        result.update(
-            verdict="FAIL",
-            reviewed_files=["a.py"],
-            considered_thread_ids=[],
-            rechecked_finding_ids=["F1"],
-            resolved_finding_ids=[],
-            remaining_finding_ids=["F1"],
-            global_invariants_rechecked=True,
-        )
+        result = fail_result(packet)
+        result["reviewed_files"] = ["a.py"]
         validation = pr_attention.validate_lineage_result(packet, result, live_head_sha=H2)
         self.assertFalse(validation["valid"])
         self.assertEqual(validation["status"], "INVALID")
@@ -91,20 +98,30 @@ class PublicContinuityGuardTests(unittest.TestCase):
         self.assertEqual(packet["coverage"], "COMPLETE")
         self.assertEqual(packet["thread_coverage"], "COMPLETE")
         self.assertTrue(packet["complete"])
-        result = pr_attention.build_lineage_result_template(packet, reviewer_name="reviewer")
-        result.update(
-            verdict="FAIL",
-            reviewed_files=["a.py", "b.py"],
-            considered_thread_ids=[],
-            rechecked_finding_ids=["F1"],
-            resolved_finding_ids=[],
-            remaining_finding_ids=["F1"],
-            global_invariants_rechecked=True,
-        )
-        validation = pr_attention.validate_lineage_result(packet, result, live_head_sha=H2)
+        validation = pr_attention.validate_lineage_result(packet, fail_result(packet), live_head_sha=H2)
         self.assertTrue(validation["valid"], validation["reasons"])
         self.assertEqual(validation["status"], "VALID_FAIL")
         self.assertEqual(validation["next_failed_checkpoint"]["failed_reviewed_checkpoint_sha"], H2)
+        self.assertEqual(validation["kind"], "PR_ATTENTION_REREVIEW_VALIDATION")
+        self.assertEqual(validation["previous_reviewed_head_sha"], H1)
+        self.assertEqual(validation["rereview_packet_sha256"], packet["lineage_packet_sha256"])
+
+    def test_v11_validation_is_consumed_by_existing_advisory_gate(self):
+        packet = lineage_packet()
+        validation = pr_attention.validate_lineage_result(packet, fail_result(packet), live_head_sha=H2)
+        snapshot = {
+            "schema_version": 2,
+            "repository": "o/r",
+            "pr_number": 7,
+            "head_sha": H2,
+            "final_head_sha": H2,
+            "attention": "READY",
+            "facts_complete": True,
+            "stale": False,
+        }
+        gate = build_rereview_integration_gate(snapshot, validation)
+        self.assertEqual(gate.status, "REPAIR")
+        self.assertFalse(gate.merge_ready)
 
     def test_legacy_rereview_partial_packet_is_not_reusable(self):
         fake = {
