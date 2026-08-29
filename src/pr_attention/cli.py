@@ -125,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     packet.add_argument("repository", help="owner/repository")
     packet.add_argument("pr_number", type=int)
     packet.add_argument("--accepted-head", required=True, help="last semantically accepted full commit SHA")
+    packet.add_argument("--expected-head", help="caller-bound full head SHA; mismatch forces STALE/UNKNOWN")
     packet.add_argument("--max-total-patch-bytes", type=int, default=DEFAULT_MAX_TOTAL_PATCH_BYTES)
     packet.add_argument("--max-file-patch-bytes", type=int, default=DEFAULT_MAX_FILE_PATCH_BYTES)
     packet.add_argument("--json", action="store_true", dest="json_output")
@@ -156,6 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.repository,
             args.pr_number,
             args.accepted_head,
+            expected_head_sha=args.expected_head,
             max_total_patch_bytes=args.max_total_patch_bytes,
             max_file_patch_bytes=args.max_file_patch_bytes,
         )
