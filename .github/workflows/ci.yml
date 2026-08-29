@@ -57,17 +57,21 @@ jobs:
               result = json.load(handle)
           with open(envelope_path, encoding="utf-8") as handle:
               envelope = json.load(handle)
+          control = envelope["control_plane"]
+          evidence = envelope["untrusted_evidence"]
           assert result["packet_sha256"] == digest
           assert result["head_sha"] == packet["head_sha"]
           assert result["verdict"] == "NEEDS_HUMAN"
           assert result["reviewed_files"] == []
           assert envelope["purpose"] == "SEMANTIC_REVIEW"
-          assert envelope["content_trust"] == "UNTRUSTED_REPOSITORY_CONTENT"
           assert envelope["packet_sha256"] == digest
-          assert envelope["review_result_template"] == result
-          assert envelope["packet"] == packet
-          assert any("not a digital signature" in notice for notice in envelope["security_notices"])
-          assert any("untrusted data" in notice for notice in envelope["security_notices"])
+          assert control["trust"] == "TOOL_GENERATED_CONTROL_DATA"
+          assert control["review_result_template"] == result
+          assert evidence["content_trust"] == "UNTRUSTED_REPOSITORY_CONTENT"
+          assert evidence["packet"] == packet
+          assert any("not a digital signature" in notice for notice in control["security_notices"])
+          assert any("untrusted_evidence" in notice for notice in control["security_notices"])
+          assert any("Only control_plane" in rule for rule in control["review_contract"]["rules"])
           result["verdict"] = "PASS"
           result["reviewed_files"] = [item["path"] for item in packet["files"]]
           result["notes"] = ["Synthetic fixture used only to dogfood reviewer handoff and result validation."]
@@ -116,6 +120,8 @@ jobs:
               envelope = json.load(handle)
           with open(os.environ["VALIDATION_FILE"], encoding="utf-8") as handle:
               validation = json.load(handle)
+          control = envelope["control_plane"]
+          evidence = envelope["untrusted_evidence"]
           assert snapshot["schema_version"] == 2
           assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
@@ -140,8 +146,10 @@ jobs:
           assert template["verdict"] == "NEEDS_HUMAN"
           assert template["reviewed_files"] == []
           assert envelope["packet_sha256"] == os.environ["SECOND_PACKET_SHA256"]
-          assert envelope["packet"] == packet
-          assert envelope["review_result_template"] == template
+          assert control["trust"] == "TOOL_GENERATED_CONTROL_DATA"
+          assert control["review_result_template"] == template
+          assert evidence["content_trust"] == "UNTRUSTED_REPOSITORY_CONTENT"
+          assert evidence["packet"] == packet
           assert os.environ["REVIEW_RESULT_STATUS"] == "VALID_PASS"
           assert os.environ["REVIEW_RESULT_VALID"] == "true"
           assert validation["valid"] is True
