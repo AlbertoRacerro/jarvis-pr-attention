@@ -49,10 +49,12 @@ def build_rereview_result_template(
 ) -> dict[str, Any]:
     if not isinstance(reviewer_name, str) or not reviewer_name.strip():
         raise ValueError("reviewer_name must be non-empty")
+    if reviewer_model is not None and (not isinstance(reviewer_model, str) or not reviewer_model.strip()):
+        raise ValueError("reviewer_model must be non-empty when supplied")
     _validate_packet_shape(packet)
     reviewer: dict[str, Any] = {"name": reviewer_name.strip()}
-    if reviewer_model:
-        reviewer["model"] = reviewer_model
+    if reviewer_model is not None:
+        reviewer["model"] = reviewer_model.strip()
     prior_ids = [item["id"] for item in packet["prior_blocking_findings"]]
     return {
         "schema_version": REREVIEW_RESULT_SCHEMA_VERSION,
@@ -83,6 +85,10 @@ def _valid_sha(value: Any) -> bool:
 
 def _valid_digest(value: Any) -> bool:
     return isinstance(value, str) and bool(_DIGEST.fullmatch(value))
+
+
+def _strict_positive_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _paths(items: Any, label: str, reasons: list[str]) -> list[str]:
@@ -121,14 +127,49 @@ def _validate_packet_shape(packet: dict[str, Any]) -> None:
         reasons.append("re-review packet digest is invalid")
     if packet.get("content_trust") != "UNTRUSTED_REPOSITORY_CONTENT":
         reasons.append("re-review packet content_trust marker is invalid")
-    if packet.get("coverage") not in {"COMPLETE", "PARTIAL", "NONE", "UNKNOWN"}:
+
+    relation = packet.get("relation")
+    review_scope = packet.get("review_scope")
+    eligible = packet.get("incremental_eligible")
+    coverage = packet.get("coverage")
+    complete = packet.get("complete")
+    if relation not in {"AHEAD", "BEHIND", "DIVERGED", "CURRENT", "UNKNOWN"}:
+        reasons.append("re-review packet relation is invalid")
+    if coverage not in {"COMPLETE", "PARTIAL", "NONE", "UNKNOWN"}:
         reasons.append("re-review packet coverage is invalid")
-    if not isinstance(packet.get("complete"), bool) or not isinstance(packet.get("incremental_eligible"), bool):
+    if not isinstance(complete, bool) or not isinstance(eligible, bool):
         reasons.append("re-review packet completeness/eligibility flags are invalid")
+    if eligible is True and (relation != "AHEAD" or review_scope != "REREVIEW_DELTA_PLUS_FINDINGS"):
+        reasons.append("incrementally eligible re-review packet requires AHEAD + REREVIEW_DELTA_PLUS_FINDINGS")
+    if complete is True and (eligible is not True or coverage != "COMPLETE"):
+        reasons.append("complete re-review packet requires incremental eligibility and COMPLETE coverage")
+    if coverage == "COMPLETE" and complete is not True:
+        reasons.append("COMPLETE coverage requires complete=true")
     if packet.get("global_invariants_recheck_required") is not True:
         reasons.append("re-review packet must require global invariant recheck")
-    _paths(packet.get("repair_delta_files"), "repair_delta_files", reasons)
+
+    total_budget = _strict_positive_int(packet.get("max_total_patch_bytes"))
+    file_budget = _strict_positive_int(packet.get("max_file_patch_bytes"))
+    included_bytes = packet.get("included_patch_bytes")
+    if total_budget is None or file_budget is None:
+        reasons.append("re-review packet patch budgets must be positive integers")
+    if not isinstance(included_bytes, int) or isinstance(included_bytes, bool) or included_bytes < 0:
+        reasons.append("re-review packet included_patch_bytes is invalid")
+    elif total_budget is not None and included_bytes > total_budget:
+        reasons.append("re-review packet included_patch_bytes exceeds total budget")
+
+    delta_paths = _paths(packet.get("repair_delta_files"), "repair_delta_files", reasons)
     context_paths = _paths(packet.get("finding_context_files"), "finding_context_files", reasons)
+    if eligible is True and not delta_paths:
+        reasons.append("incrementally eligible re-review packet requires at least one repair-delta file")
+
+    expansion = packet.get("scope_expansion_files")
+    if not isinstance(expansion, list) or any(not isinstance(path, str) or not path for path in expansion):
+        reasons.append("scope_expansion_files must be a list of non-empty strings")
+    elif len(expansion) != len(set(expansion)):
+        reasons.append("scope_expansion_files contains duplicates")
+    elif not set(expansion).issubset(set(delta_paths)):
+        reasons.append("scope_expansion_files must be a subset of repair-delta files")
 
     findings = packet.get("prior_blocking_findings")
     if not isinstance(findings, list) or not findings:
@@ -148,7 +189,7 @@ def _validate_packet_shape(packet: dict[str, Any]) -> None:
             reasons.append(f"prior finding {finding_id or '<unknown>'} must be blocking")
         path = finding.get("path")
         if path is not None and (not isinstance(path, str) or path not in context_paths):
-            if packet.get("complete") is True:
+            if complete is True:
                 reasons.append(f"complete re-review packet lacks prior context for finding {finding_id or '<unknown>'}")
     if len(finding_ids) != len(set(finding_ids)):
         reasons.append("prior blocking finding IDs must be unique")
@@ -314,6 +355,8 @@ def validate_rereview_result(
         if blocking_count:
             reasons.append("PASS cannot contain new blocking findings")
     elif verdict == "FAIL":
+        if set(rechecked) != prior_ids or set(resolved) | set(remaining) != prior_ids:
+            reasons.append("FAIL requires every prior blocking finding to be rechecked and classified resolved or remaining")
         if not remaining and blocking_count == 0:
             reasons.append("FAIL requires at least one remaining prior finding or a new blocking finding")
 
