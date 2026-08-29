@@ -17,6 +17,7 @@ from .rereview_gate import build_rereview_integration_gate
 from .rereview_handoff import build_rereview_envelope
 from .rereview_packet import build_rereview_packet, collect_rereview_packet, rereview_packet_sha256
 from .rereview_result import build_rereview_result_template, validate_rereview_result
+from .truth import normalize_native_review_policy, normalize_required_checks
 
 __all__ = [
     "collect_snapshot",
@@ -42,5 +43,7 @@ __all__ = [
     "build_rereview_evidence_bundle",
     "rereview_bundle_sha256",
     "verify_rereview_evidence_bundle",
+    "normalize_required_checks",
+    "normalize_native_review_policy",
 ]
-__version__ = "0.11.0"
+__version__ = "0.12.0"
