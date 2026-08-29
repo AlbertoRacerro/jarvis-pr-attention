@@ -23,21 +23,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - id: baseline
+        name: Resolve exact merge-base baseline
+        shell: bash
+        run: echo "sha=$(git merge-base origin/${{ github.base_ref }} HEAD)" >> "$GITHUB_OUTPUT"
       - id: attention
         uses: ./
         with:
           pr-number: ${{ github.event.pull_request.number }}
-      - name: Verify exact head and normalized state
+          accepted-head: ${{ steps.baseline.outputs.sha }}
+      - name: Verify exact head and incremental review plan
         env:
           SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASELINE: ${{ steps.baseline.outputs.sha }}
+          REVIEW_SCOPE: ${{ steps.attention.outputs.review-scope }}
+          NEXT_ACTION: ${{ steps.attention.outputs.next-action-class }}
         run: |
           python3 - <<'PY'
           import json, os
           with open(os.environ["SNAPSHOT_FILE"], encoding="utf-8") as handle:
               snapshot = json.load(handle)
+          assert snapshot["schema_version"] == 2
           assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
-          assert snapshot["attention"] in {"READY", "PENDING", "BLOCKED", "UNKNOWN"}
+          assert snapshot["delta"]["accepted_head_sha"] == os.environ["EXPECTED_BASELINE"]
+          assert snapshot["delta"]["relation"] == "AHEAD"
+          assert snapshot["delta"]["review_scope"] == "DELTA"
+          assert os.environ["REVIEW_SCOPE"] == "DELTA"
+          assert os.environ["NEXT_ACTION"] in {"WAIT_FOR_GATES", "REVIEW_DELTA", "REPAIR", "INVESTIGATE_UNKNOWN"}
           assert snapshot["stale"] is False
           PY

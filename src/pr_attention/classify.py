@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from .models import AttentionState, CheckSummary, MergeSummary, ReviewSummary, ThreadSummary
+from .models import (
+    AttentionState,
+    CheckSummary,
+    DeltaSummary,
+    MergeSummary,
+    NextActionClass,
+    ReviewSummary,
+    ThreadSummary,
+)
 
 
 def classify_attention(
@@ -45,3 +53,22 @@ def classify_attention(
     if pending:
         return "PENDING", [], pending
     return "READY", [], []
+
+
+def classify_next_action(attention: AttentionState, delta: DeltaSummary) -> NextActionClass:
+    if attention == "STALE":
+        return "REFRESH_SNAPSHOT"
+    if attention == "UNKNOWN":
+        return "INVESTIGATE_UNKNOWN"
+    if attention == "BLOCKED":
+        return "REPAIR"
+    if attention == "PENDING":
+        return "WAIT_FOR_GATES"
+
+    if delta.review_scope == "NONE":
+        return "MERGE_CANDIDATE"
+    if delta.review_scope == "DELTA":
+        return "REVIEW_DELTA"
+    if delta.review_scope == "FULL":
+        return "FULL_REVIEW"
+    return "INVESTIGATE_UNKNOWN"

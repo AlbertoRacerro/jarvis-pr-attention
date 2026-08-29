@@ -6,6 +6,18 @@ from typing import Any, Literal
 AttentionState = Literal["READY", "PENDING", "BLOCKED", "STALE", "UNKNOWN"]
 CIState = Literal["SUCCESS", "PENDING", "FAILURE", "UNKNOWN"]
 ReviewState = Literal["APPROVED", "CHANGES_REQUESTED", "NONE", "STALE_ONLY", "MIXED"]
+DeltaRelation = Literal["ABSENT", "CURRENT", "AHEAD", "BEHIND", "DIVERGED", "UNKNOWN"]
+AcceptanceValidity = Literal["ABSENT", "CURRENT", "REUSABLE_FOR_UNCHANGED", "INVALID", "UNKNOWN"]
+ReviewScope = Literal["NONE", "DELTA", "FULL", "UNKNOWN"]
+NextActionClass = Literal[
+    "MERGE_CANDIDATE",
+    "REVIEW_DELTA",
+    "FULL_REVIEW",
+    "REPAIR",
+    "WAIT_FOR_GATES",
+    "REFRESH_SNAPSHOT",
+    "INVESTIGATE_UNKNOWN",
+]
 
 
 @dataclass(frozen=True)
@@ -52,6 +64,32 @@ class ScopeSummary:
 
 
 @dataclass(frozen=True)
+class DeltaFile:
+    path: str
+    status: str
+    additions: int = 0
+    deletions: int = 0
+    changes: int = 0
+    previous_path: str | None = None
+
+
+@dataclass(frozen=True)
+class DeltaSummary:
+    accepted_head_sha: str | None
+    relation: DeltaRelation
+    acceptance_validity: AcceptanceValidity
+    review_scope: ReviewScope
+    complete: bool
+    commits_ahead: int | None = None
+    commits_behind: int | None = None
+    additions: int = 0
+    deletions: int = 0
+    changed_files: int = 0
+    files: list[DeltaFile] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Snapshot:
     schema_version: int
     repository: str
@@ -67,7 +105,9 @@ class Snapshot:
     reviews: ReviewSummary
     threads: ThreadSummary
     merge: MergeSummary
+    delta: DeltaSummary
     attention: AttentionState
+    next_action_class: NextActionClass
     blockers: list[str]
     pending_reasons: list[str]
     facts_complete: bool

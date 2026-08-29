@@ -3,4 +3,4 @@
 from .cli import collect_snapshot
 
 __all__ = ["collect_snapshot"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
