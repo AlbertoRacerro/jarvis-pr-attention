@@ -17,7 +17,8 @@ PATCH_SAFETY_NOTICE = (
 
 
 def _require_packet(packet: dict[str, Any]) -> list[str]:
-    if packet.get("schema_version") != 1:
+    schema_version = packet.get("schema_version")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
         raise ValueError("unsupported review packet schema_version")
     if packet.get("content_trust") != CONTENT_TRUST:
         raise ValueError("review packet content_trust marker is invalid")
