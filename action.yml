@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate deterministic exact-head PR attention, review plans, bounded delta packets, and result validation"
+description: "Generate deterministic exact-head PR attention, review packets, reviewer handoff artifacts, and result validation"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -25,6 +25,14 @@ inputs:
     description: "Maximum UTF-8 patch bytes included for any one file"
     required: false
     default: "30000"
+  reviewer-name:
+    description: "Reviewer identity prefilled into generated handoff artifacts"
+    required: false
+    default: "external-reviewer"
+  reviewer-model:
+    description: "Optional reviewer model/runtime label prefilled into handoff artifacts"
+    required: false
+    default: ""
   review-result-file:
     description: "Optional structured reviewer result JSON to validate against the generated packet and live head"
     required: false
@@ -61,8 +69,14 @@ outputs:
     description: "UTF-8 patch bytes included in the review packet"
     value: ${{ steps.snapshot.outputs.packet-patch-bytes }}
   packet-sha256:
-    description: "Stable SHA-256 identity of the semantic review packet evidence"
+    description: "Stable SHA-256 content identity of the semantic review packet evidence; not a signature"
     value: ${{ steps.snapshot.outputs.packet-sha256 }}
+  review-result-template-file:
+    description: "Path to reviewer-result JSON template bound to the packet"
+    value: ${{ steps.snapshot.outputs.review-result-template-file }}
+  review-envelope-file:
+    description: "Path to deterministic reviewer handoff envelope containing contract plus untrusted packet evidence"
+    value: ${{ steps.snapshot.outputs.review-envelope-file }}
   review-result-status:
     description: "NOT_RUN, VALID_PASS, VALID_FAIL, VALID_NEEDS_HUMAN, STALE or INVALID"
     value: ${{ steps.snapshot.outputs.review-result-status }}
@@ -83,6 +97,8 @@ runs:
         ACCEPTED_HEAD: ${{ inputs.accepted-head }}
         MAX_TOTAL_PATCH_BYTES: ${{ inputs.max-total-patch-bytes }}
         MAX_FILE_PATCH_BYTES: ${{ inputs.max-file-patch-bytes }}
+        REVIEWER_NAME: ${{ inputs.reviewer-name }}
+        REVIEWER_MODEL: ${{ inputs.reviewer-model }}
         REVIEW_RESULT_FILE: ${{ inputs.review-result-file }}
       run: |
         set -euo pipefail
@@ -104,6 +120,8 @@ runs:
         packet_complete="false"
         packet_patch_bytes="0"
         packet_digest=""
+        template_out=""
+        envelope_out=""
         if [[ -n "$ACCEPTED_HEAD" ]]; then
           packet_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-review-packet.json"
           python3 -m pr_attention review-packet "${{ inputs.repository }}" "${{ inputs.pr-number }}" \
@@ -127,6 +145,17 @@ runs:
           packet_complete="${packet_values[1]}"
           packet_patch_bytes="${packet_values[2]}"
           packet_digest="${packet_values[3]}"
+
+          template_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-review-result-template.json"
+          envelope_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-review-envelope.json"
+          template_args=(review-result-template "$packet_out" --reviewer-name "$REVIEWER_NAME" --output "$template_out")
+          envelope_args=(review-envelope "$packet_out" --reviewer-name "$REVIEWER_NAME" --output "$envelope_out")
+          if [[ -n "$REVIEWER_MODEL" ]]; then
+            template_args+=(--reviewer-model "$REVIEWER_MODEL")
+            envelope_args+=(--reviewer-model "$REVIEWER_MODEL")
+          fi
+          python3 -m pr_attention "${template_args[@]}" >/dev/null
+          python3 -m pr_attention "${envelope_args[@]}" >/dev/null
         fi
 
         validation_out=""
@@ -152,9 +181,9 @@ runs:
           review_result_valid="${validation_values[1]}"
         fi
 
-        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$validation_out" "$review_result_status" "$review_result_valid" <<'PY'
+        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" "$packet_digest" "$template_out" "$envelope_out" "$validation_out" "$review_result_status" "$review_result_valid" <<'PY'
         import json, sys
-        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, validation_path, result_status, result_valid = sys.argv[1:]
+        path, output, packet_path, coverage, complete, patch_bytes, packet_digest, template_path, envelope_path, validation_path, result_status, result_valid = sys.argv[1:]
         with open(path, encoding="utf-8") as handle:
             snapshot = json.load(handle)
         values = {
@@ -169,6 +198,8 @@ runs:
             "packet-complete": complete,
             "packet-patch-bytes": patch_bytes,
             "packet-sha256": packet_digest,
+            "review-result-template-file": template_path,
+            "review-envelope-file": envelope_path,
             "review-result-status": result_status,
             "review-result-valid": result_valid,
             "review-result-validation-file": validation_path,
