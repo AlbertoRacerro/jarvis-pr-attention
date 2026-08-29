@@ -21,10 +21,10 @@ It records separately:
 
 A failed checkpoint is not merge authority and is not semantic acceptance.
 
-Legacy V1.9 evidence is bootstrap-compatible:
+Legacy V1.9 evidence is bootstrap-compatible only when its reusable evidence was complete:
 
-- a verified `PR_ATTENTION_EVIDENCE_BUNDLE` with `VALID_FAIL + REPAIR` becomes generation 1;
-- a verified V1.9 `PR_ATTENTION_REREVIEW_EVIDENCE_BUNDLE` with `VALID_FAIL + REPAIR` becomes generation 2.
+- a verified `PR_ATTENTION_EVIDENCE_BUNDLE` with `VALID_FAIL + REPAIR`, complete packet coverage and complete reviewed-file coverage becomes generation 1;
+- a verified V1.9 `PR_ATTENTION_REREVIEW_EVIDENCE_BUNDLE` with `VALID_FAIL + REPAIR`, complete repair-delta evidence and every repair-delta file actually reviewed becomes generation 2.
 
 After that, every valid V1.11 FAIL directly emits the next self-verifying failed checkpoint, so the chain can continue without replaying the original full review.
 
@@ -59,7 +59,7 @@ A thread is included only when all are true:
 
 Thread bodies are marked `UNTRUSTED_GITHUB_REVIEW_CONTENT`. They are evidence, never instructions. The packet digest covers thread identity, path, bounded body, original-body digest and truncation state.
 
-If thread collection is unavailable, a relevant thread is malformed, or configured bounds truncate relevant thread evidence, packet completeness is false and semantic PASS is forbidden.
+If thread collection is unavailable, a relevant thread is malformed, or configured bounds truncate relevant thread evidence, packet completeness is false and semantic PASS/FAIL cannot advance reusable lineage.
 
 ## Result contract
 
@@ -77,7 +77,7 @@ PASS additionally requires:
 - all prior blockers resolved;
 - no new blocking finding.
 
-FAIL requires at least one remaining or newly discovered blocking finding. A valid FAIL emits the next failed checkpoint while preserving the accepted semantic baseline.
+FAIL requires at least one remaining or newly discovered blocking finding. A valid FAIL emits the next failed checkpoint while preserving the accepted semantic baseline. An incomplete FAIL may still be useful human evidence, but the public V1.11 validator does not let it advance reusable lineage.
 
 ## Canonical chain example
 
@@ -101,6 +101,8 @@ At no point does H1 or H2 become an accepted semantic baseline merely because it
 
 ## Public API
 
+The supported package-level V1.11 API routes checkpoint promotion and validation through the strict fail-closed guards:
+
 - `failed_checkpoint_from_bundle(...)`
 - `failed_checkpoint_from_evidence_bundle(...)`
 - `failed_checkpoint_from_rereview_bundle(...)`
@@ -111,4 +113,28 @@ At no point does H1 or H2 become an accepted semantic baseline merely because it
 - `build_lineage_result_template(...)`
 - `validate_lineage_result(...)`
 
-The live collector reuses the existing GitHub exact-head compare and GraphQL review-thread collector. GitHub remains the only source of PR truth; V1.11 adds no persistence or authority store.
+The live collector reuses the existing GitHub exact-head compare and GraphQL review-thread collector. V1.11 validation also exposes the compatibility aliases consumed by the existing deterministic re-review integration gate; the gate semantics are not duplicated.
+
+## CLI
+
+`pr-attention-continuity` exposes the multi-generation path directly:
+
+```text
+checkpoint <source.json>
+packet <owner/repo> <pr> <source.json>
+digest <packet.json>
+template <packet.json> --reviewer-name <name>
+envelope <packet.json> --reviewer-name <name>
+validate <packet.json> <result.json> [--live]
+gate <snapshot.json> <validation.json>
+```
+
+`packet` has independent patch and review-thread byte/count budgets and fails closed when exact-head, compare, patch or thread evidence is insufficient.
+
+## Composite Action boundary
+
+The root composite Action remains the backward-compatible V1.9 H1→H2 orchestration in this release. It is not silently reinterpreted as a V1.11 multi-generation bundle format. Multi-generation V1.11 is available through the supported Python API and `pr-attention-continuity` CLI.
+
+Wiring the root Action to V1.11 should be done only together with a self-verifying V1.11 unified evidence-bundle contract, so the Action does not create a second partial authority/evidence format. Until then, callers must not claim root-Action multi-generation support.
+
+GitHub remains the only source of PR truth; V1.11 adds no persistence or authority store.
