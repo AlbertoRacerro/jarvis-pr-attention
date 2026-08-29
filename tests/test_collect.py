@@ -1,5 +1,6 @@
 import unittest
 
+import pr_attention
 from pr_attention.cli import collect_snapshot
 
 
@@ -49,6 +50,9 @@ class FakeClient:
 
 
 class CollectTests(unittest.TestCase):
+    def test_public_collect_snapshot_export_is_preserved(self):
+        self.assertIs(pr_attention.collect_snapshot, collect_snapshot)
+
     def test_schema_v2_and_delta_review(self):
         s = collect_snapshot(FakeClient(), "o/r", 1, accepted_head_sha=ACCEPTED)
         self.assertEqual(s.schema_version, 2)
