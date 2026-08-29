@@ -6,11 +6,13 @@ from .continuity import (
     build_lineage_rereview_packet,
     build_lineage_result_template,
     checkpoint_sha256,
+    lineage_packet_sha256,
+)
+from .continuity_guard import (
     collect_lineage_rereview_packet,
     failed_checkpoint_from_bundle,
     failed_checkpoint_from_evidence_bundle,
     failed_checkpoint_from_rereview_bundle,
-    lineage_packet_sha256,
     validate_lineage_result,
 )
 from .evidence_bundle import build_evidence_bundle, bundle_sha256, verify_evidence_bundle
