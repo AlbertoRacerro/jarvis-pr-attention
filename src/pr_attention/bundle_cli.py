@@ -51,6 +51,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 validation=_optional(args.validation_file),
                 integration_gate=_optional(args.integration_gate_file),
             )
+            verification = verify_evidence_bundle(bundle)
+            if not verification.valid:
+                raise ValueError("generated evidence bundle failed self-verification: " + "; ".join(verification.reasons))
             _write(bundle, args.output)
             return 0
 
