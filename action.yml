@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, integration gate, and one unified evidence bundle"
+description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, integration gate, unified evidence bundle, and compact agent attention"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -104,6 +104,21 @@ outputs:
   evidence-bundle-phase:
     description: "SNAPSHOT_ONLY, PACKET_READY, REVIEW_HANDOFF_READY, REVIEW_VALIDATED or INTEGRATION_EVALUATED"
     value: ${{ steps.snapshot.outputs.evidence-bundle-phase }}
+  attention-digest-file:
+    description: "Path to the bounded patch-free compact attention digest"
+    value: ${{ steps.compact.outputs.attention-digest-file }}
+  attention-digest-sha256:
+    description: "Stable content identity of the compact attention digest"
+    value: ${{ steps.compact.outputs.attention-digest-sha256 }}
+  attention-next-exact-action:
+    description: "Deterministic next exact action class after integration evaluation when available"
+    value: ${{ steps.compact.outputs.attention-next-exact-action }}
+  repair-packet-file:
+    description: "Path to bounded repair evidence; empty unless the deterministic integration gate is REPAIR"
+    value: ${{ steps.compact.outputs.repair-packet-file }}
+  repair-packet-sha256:
+    description: "Stable content identity of repair evidence; empty when no repair packet is emitted"
+    value: ${{ steps.compact.outputs.repair-packet-sha256 }}
 runs:
   using: "composite"
   steps:
@@ -268,3 +283,43 @@ runs:
             for key, value in values.items():
                 handle.write(f"{key}={value}\n")
         PY
+
+    - id: compact
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/src
+        BUNDLE_FILE: ${{ steps.snapshot.outputs.evidence-bundle-file }}
+        INTEGRATION_STATUS: ${{ steps.snapshot.outputs.integration-gate-status }}
+      run: |
+        set -euo pipefail
+        digest_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-attention-digest.json"
+        python3 -m pr_attention.compact_cli digest "$BUNDLE_FILE" --output "$digest_out" >/dev/null
+        readarray -t digest_values < <(python3 - "$digest_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            digest = json.load(handle)
+        print(digest["attention_digest_sha256"])
+        print(digest["next_exact_action_class"])
+        PY
+        )
+
+        repair_out=""
+        repair_digest=""
+        if [[ "$INTEGRATION_STATUS" == "REPAIR" ]]; then
+          repair_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-repair-packet.json"
+          python3 -m pr_attention.compact_cli repair "$BUNDLE_FILE" --output "$repair_out" >/dev/null
+          repair_digest=$(python3 - "$repair_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            print(json.load(handle)["repair_packet_sha256"])
+        PY
+          )
+        fi
+
+        {
+          echo "attention-digest-file=$digest_out"
+          echo "attention-digest-sha256=${digest_values[0]}"
+          echo "attention-next-exact-action=${digest_values[1]}"
+          echo "repair-packet-file=$repair_out"
+          echo "repair-packet-sha256=$repair_digest"
+        } >> "$GITHUB_OUTPUT"
