@@ -6,42 +6,36 @@ This document tracks the public open-source projects that informed `jarvis-pr-at
 2. behavior intentionally excluded because it conflicts with the read-only/stateless design;
 3. genuine gaps that may improve correctness or review efficiency.
 
-Percentages below refer to the **subset relevant to this project's goals**, not to feature parity with the entire third-party application. The implementation remains original; the percentages are engineering coverage estimates, not compatibility claims.
+Percentages refer to the **subset relevant to this project's goals**, not feature parity with an entire third-party application. The implementation remains original; these are engineering coverage estimates, not compatibility claims.
 
-## deployhq/pr-radar — relevant subset: about 90–95% covered
+## deployhq/pr-radar — relevant subset: about 95–100% covered
 
-Already covered:
+Covered:
 
-- exact PR head identity;
+- exact PR head identity and late-head stale detection;
 - paginated REST review retrieval;
 - current-head review classification using review `commit_id`;
-- stale old-head reviews separated from current evidence;
-- dismissed-review handling;
-- Check Runs plus legacy Commit Status collection;
-- fail-closed CI state normalization;
-- GraphQL `reviewThreads` collection with `isResolved`, `isOutdated`, path, author and leading body;
-- unresolved-current vs unresolved-outdated thread separation;
-- mergeability/conflict state;
-- additions/deletions/file counts;
-- late head re-read and `STALE` classification.
+- stale and dismissed review handling;
+- Check Runs plus legacy Commit Status aggregation;
+- fail-closed CI normalization;
+- GraphQL review-thread pagination with resolved/outdated separation;
+- mergeability/conflict and change-scope facts;
+- explicit fail-closed pagination-ceiling detection;
+- branch/ruleset-aware required-check truth, kept separate from aggregate CI.
 
-Deliberately not copied:
+Deliberately excluded:
 
-- browser extension UI;
-- local cache/background polling;
-- notifications;
+- browser extension UI and local cache;
+- background polling and notifications;
 - multi-forge GitLab/Bitbucket support;
 - local AI summaries;
-- merge UI and deployment presentation.
+- merge/deployment UI.
 
-Genuine remaining gaps:
+The remaining differences are product-surface differences rather than correctness gaps for this tool.
 
-- branch-protection/ruleset-aware **required** check classification rather than only aggregate check evidence;
-- explicit fail-closed detection when an API pagination safety ceiling is exhausted.
+## GrantBirki/pr-status — relevant subset: about 95% covered
 
-## GrantBirki/pr-status — relevant subset: about 85–90% covered
-
-Already covered:
+Covered:
 
 - exact head binding and stale-head detection;
 - SUCCESS / PENDING / FAILURE / UNKNOWN check normalization;
@@ -49,21 +43,17 @@ Already covered:
 - pending for queued/in-progress/pending/requested/waiting/expected;
 - failure for failure/error/cancelled/timed-out/action-required/startup-failure/stale;
 - aggregation precedence `FAILURE > UNKNOWN > PENDING > SUCCESS`;
-- absent check evidence fails closed to UNKNOWN;
+- absent check evidence fails closed;
 - mergeability/conflict evidence;
-- deterministic machine-readable decision states.
+- branch/ruleset required-check awareness, including optional integration-id binding;
+- draft PR state;
+- native GitHub `reviewDecision` as a separate repository-policy fact.
 
-Genuine remaining gaps:
+Jarvis semantic acceptance remains separate from native GitHub approval policy. A native `APPROVED` value is evidence about repository review state, not semantic acceptance by JarvisOS.
 
-- ruleset/branch-protection required-check awareness;
-- native GitHub review-decision/approval-policy evidence as a separate field;
-- draft PR state is not currently a first-class attention input.
+## frankyxhl/sweeping-monk — desired subset: about 85–90% covered
 
-The last two should remain separate from Jarvis semantic acceptance: native GitHub approval policy is repository state, while Jarvis semantic acceptance is represented by the structured review-result contract.
-
-## frankyxhl/sweeping-monk — desired subset: about 85% covered
-
-Already covered:
+Covered:
 
 - read-only PR watchdog semantics;
 - deterministic READY/BLOCKED/PENDING-style classification;
@@ -71,7 +61,8 @@ Already covered:
 - exact head and CI/merge/review/thread evidence;
 - structured blockers and next-action classification;
 - extensive deterministic/adversarial tests;
-- repair-oriented evidence packets.
+- repair-oriented evidence packets;
+- native draft/review-policy facts and fail-closed fact completeness.
 
 Deliberately excluded:
 
@@ -85,7 +76,7 @@ Those omissions are architectural requirements, not backlog. GitHub live state r
 
 ## dan-sotnik/llama-pr-reviewer — relevant subset: about 75–80% covered
 
-Already covered:
+Covered:
 
 - explicit previous semantic SHA;
 - accepted-head-to-current-head delta review;
@@ -101,8 +92,8 @@ Already covered:
 Genuine remaining gaps:
 
 - active unresolved/non-outdated review threads are not yet folded into the re-review packet as continuity evidence;
-- no explicit prior-self-comment echo suppression because this tool does not currently ingest top-level reviewer conversation as review input;
-- the exact `base -> PR net diff` plus path narrowing algorithm used there is not replicated; this project currently uses GitHub compare from the explicit reviewed/accepted SHA;
+- no explicit prior-self-comment echo suppression because this tool does not ingest top-level reviewer conversation as review input;
+- the exact `base -> PR net diff` plus path narrowing algorithm used there is not replicated; this project compares from the explicit reviewed/accepted SHA;
 - multi-generation `FAIL H1 -> FAIL H2 -> repair H3` checkpoint chaining is not yet supported by the unified re-review bundle.
 
 ## SamuelCabralCruz/unresolved-review-threads — relevant subset: about 90% covered
@@ -112,7 +103,8 @@ Covered:
 - GraphQL review-thread retrieval;
 - resolved/unresolved distinction;
 - outdated unresolved threads separated from current unresolved threads;
-- current unresolved threads act as blockers.
+- current unresolved threads act as blockers;
+- pagination exhaustion now fails closed.
 
 Deliberately excluded:
 
@@ -120,30 +112,22 @@ Deliberately excluded:
 - commit-status mutation;
 - merge enforcement as an actuator.
 
-## GitHub CLI (`cli/cli`) — data concepts covered; transport backend not implemented
+## GitHub CLI (`cli/cli`) — data concepts covered; transport backend intentionally absent
 
-The original design review considered `gh` as a convenient authentication/transport layer. The current reusable Action instead uses an original Python-standard-library REST/GraphQL client with `GITHUB_TOKEN` / `GH_TOKEN`.
+The current reusable Action uses an original Python-standard-library REST/GraphQL client with `GITHUB_TOKEN` / `GH_TOKEN` rather than shelling out to `gh`.
 
-Therefore:
-
-- PR/review/status data concepts inspired by GitHub CLI are covered;
-- **`gh` transport parity itself is 0%**, intentionally so far.
-
-This is not currently an alpha blocker. A `gh` backend could be useful for local operator ergonomics, while the dependency-free HTTP backend is advantageous inside a reusable Action.
+PR/review/status/policy data concepts are covered. `gh` transport parity remains 0% by design and is not a correctness blocker. An optional `gh` backend may still be useful later for local operator ergonomics.
 
 ## Danger, Policy Bot and reviewdog — intentionally not adopted
 
-These were evaluated as ecosystem references but are not target architectures. Rule-engine automation, external approval-policy authority and static-finding actuation would broaden this tool beyond its intended deterministic read-only evidence boundary.
+These were evaluated as ecosystem references but are not target architectures. Rule-engine automation, external approval-policy authority and static-finding actuation would broaden this tool beyond its deterministic read-only evidence boundary.
 
-## Cross-cutting remaining work
+## Cross-cutting remaining work after V1.10
 
-Highest-value real gaps after V1.9:
+Highest-value real gaps:
 
-1. **Required-check truth** — read branch protection/rulesets and distinguish required gates from optional checks without losing the raw aggregate view.
-2. **Pagination exhaustion fail-closed** — if review/thread/check/status pagination reaches the configured safety ceiling while a next page still exists, surface incomplete facts rather than silently accepting the prefix.
-3. **Draft/native review-decision facts** — expose them as GitHub facts without conflating them with Jarvis semantic acceptance.
-4. **Re-review thread continuity** — carry current unresolved/non-outdated review threads into bounded re-review evidence when useful.
-5. **Multi-generation failed-review chaining** — allow a validated incremental FAIL to become the next bounded checkpoint without forcing a new full review, subject to strict continuity rules.
-6. **Optional `gh` transport** — convenience backend, not correctness-critical.
+1. **Re-review thread continuity** — carry current unresolved/non-outdated review threads into bounded re-review evidence where they affect the repaired scope.
+2. **Multi-generation failed-review chaining** — allow a validated incremental FAIL to become the next bounded checkpoint without forcing a new full review, subject to strict continuity rules.
+3. **Optional `gh` transport** — convenience backend for local use, not correctness-critical.
 
-Top-level issue comments, deployment status, browser dashboards, notifications, persistence, auto-resolve, auto-approve and auto-merge are currently non-goals unless a future consumer demonstrates a concrete need.
+Top-level issue comments, deployment dashboards, notifications, persistence as authority, auto-resolve, auto-approve and auto-merge remain non-goals unless a future consumer demonstrates a concrete need.
