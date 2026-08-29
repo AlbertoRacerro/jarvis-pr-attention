@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import Snapshot
+from .models import ReviewPacket, Snapshot
 
 
 def render_text(snapshot: Snapshot) -> str:
@@ -33,4 +33,26 @@ def render_text(snapshot: Snapshot) -> str:
         lines.extend(["", "BLOCKERS", *[f"- {item}" for item in snapshot.blockers]])
     if snapshot.pending_reasons:
         lines.extend(["", "PENDING", *[f"- {item}" for item in snapshot.pending_reasons]])
+    return "\n".join(lines)
+
+
+def render_packet_text(packet: ReviewPacket) -> str:
+    lines = [
+        f"PR #{packet.pr_number} — REVIEW PACKET",
+        "",
+        f"HEAD        {packet.head_sha[:12]} {'CURRENT' if packet.head_sha == packet.final_head_sha else 'STALE'}",
+        f"BASELINE    {packet.accepted_head_sha[:12]}",
+        f"SCOPE       {packet.review_scope}",
+        f"COVERAGE    {packet.coverage}",
+        f"PATCH BYTES {packet.included_patch_bytes}/{packet.max_total_patch_bytes}",
+        f"FILES       {len(packet.files)}",
+        f"TRUST       {packet.content_trust}",
+    ]
+    if packet.reasons:
+        lines.extend(["", "NOTES", *[f"- {item}" for item in packet.reasons]])
+    partial = [item for item in packet.files if item.truncated or item.omission_reason]
+    if partial:
+        lines.extend(["", "INCOMPLETE FILE EVIDENCE"])
+        for item in partial:
+            lines.append(f"- {item.path}: {item.omission_reason or 'truncated'}")
     return "\n".join(lines)

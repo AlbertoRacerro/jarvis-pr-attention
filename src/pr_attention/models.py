@@ -9,6 +9,7 @@ ReviewState = Literal["APPROVED", "CHANGES_REQUESTED", "NONE", "STALE_ONLY", "MI
 DeltaRelation = Literal["ABSENT", "CURRENT", "AHEAD", "BEHIND", "DIVERGED", "UNKNOWN"]
 AcceptanceValidity = Literal["ABSENT", "CURRENT", "REUSABLE_FOR_UNCHANGED", "INVALID", "UNKNOWN"]
 ReviewScope = Literal["NONE", "DELTA", "FULL", "UNKNOWN"]
+PacketCoverage = Literal["COMPLETE", "PARTIAL", "NONE", "UNKNOWN"]
 NextActionClass = Literal[
     "MERGE_CANDIDATE",
     "REVIEW_DELTA",
@@ -112,6 +113,47 @@ class Snapshot:
     pending_reasons: list[str]
     facts_complete: bool
     stale: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReviewPacketFile:
+    path: str
+    status: str
+    additions: int = 0
+    deletions: int = 0
+    changes: int = 0
+    previous_path: str | None = None
+    patch: str | None = None
+    original_patch_bytes: int = 0
+    included_patch_bytes: int = 0
+    truncated: bool = False
+    omission_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReviewPacket:
+    schema_version: int
+    repository: str
+    pr_number: int
+    accepted_head_sha: str
+    head_sha: str
+    final_head_sha: str
+    generated_at: str
+    relation: DeltaRelation
+    review_scope: ReviewScope
+    attention: AttentionState
+    next_action_class: NextActionClass
+    content_trust: str
+    coverage: PacketCoverage
+    complete: bool
+    max_total_patch_bytes: int
+    max_file_patch_bytes: int
+    included_patch_bytes: int
+    files: list[ReviewPacketFile] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
