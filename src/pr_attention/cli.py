@@ -10,10 +10,16 @@ from typing import Sequence
 from .classify import classify_attention, classify_next_action
 from .github import GitHubClient, GitHubError
 from .models import MergeSummary, ScopeSummary, Snapshot
+from .packet import (
+    DEFAULT_MAX_FILE_PATCH_BYTES,
+    DEFAULT_MAX_TOTAL_PATCH_BYTES,
+    collect_review_packet,
+)
 from .normalize import normalize_checks, normalize_delta, normalize_reviews, normalize_threads
-from .render import render_text
+from .render import render_packet_text, render_text
 
 EXIT_CODES = {"READY": 0, "PENDING": 10, "BLOCKED": 20, "STALE": 30, "UNKNOWN": 40}
+PACKET_EXIT_CODES = {"COMPLETE": 0, "PARTIAL": 50, "NONE": 60, "UNKNOWN": 70}
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -114,27 +120,51 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--json", action="store_true", dest="json_output")
     snapshot.add_argument("--output", help="write JSON snapshot to a file")
     snapshot.add_argument("--no-state-exit", action="store_true", help="always exit 0 after a successful retrieval")
+
+    packet = sub.add_parser("review-packet", help="collect a bounded exact-head delta review packet")
+    packet.add_argument("repository", help="owner/repository")
+    packet.add_argument("pr_number", type=int)
+    packet.add_argument("--accepted-head", required=True, help="last semantically accepted full commit SHA")
+    packet.add_argument("--max-total-patch-bytes", type=int, default=DEFAULT_MAX_TOTAL_PATCH_BYTES)
+    packet.add_argument("--max-file-patch-bytes", type=int, default=DEFAULT_MAX_FILE_PATCH_BYTES)
+    packet.add_argument("--json", action="store_true", dest="json_output")
+    packet.add_argument("--output", help="write JSON review packet to a file")
+    packet.add_argument("--no-coverage-exit", action="store_true", help="always exit 0 after successful packet retrieval")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        snapshot = collect_snapshot(
-            GitHubClient.from_env(),
+        client = GitHubClient.from_env()
+        if args.command == "snapshot":
+            result = collect_snapshot(
+                client,
+                args.repository,
+                args.pr_number,
+                accepted_head_sha=args.accepted_head,
+            )
+            payload = json.dumps(result.to_dict(), sort_keys=True, indent=2)
+            if args.output:
+                with open(args.output, "w", encoding="utf-8") as handle:
+                    handle.write(payload + "\n")
+            print(payload if args.json_output else render_text(result))
+            return 0 if args.no_state_exit else EXIT_CODES[result.attention]
+
+        result = collect_review_packet(
+            client,
             args.repository,
             args.pr_number,
-            accepted_head_sha=args.accepted_head,
+            args.accepted_head,
+            max_total_patch_bytes=args.max_total_patch_bytes,
+            max_file_patch_bytes=args.max_file_patch_bytes,
         )
+        payload = json.dumps(result.to_dict(), sort_keys=True, indent=2)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                handle.write(payload + "\n")
+        print(payload if args.json_output else render_packet_text(result))
+        return 0 if args.no_coverage_exit else PACKET_EXIT_CODES[result.coverage]
     except (GitHubError, ValueError) as exc:
         print(f"pr-attention: {exc}", file=sys.stderr)
-        return 40
-
-    payload = json.dumps(snapshot.to_dict(), sort_keys=True, indent=2)
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as handle:
-            handle.write(payload + "\n")
-    print(payload if args.json_output else render_text(snapshot))
-    if args.no_state_exit:
-        return 0
-    return EXIT_CODES[snapshot.attention]
+        return 40 if args.command == "snapshot" else 70
