@@ -37,16 +37,59 @@ jobs:
           accepted-head: ${{ steps.baseline.outputs.sha }}
           max-total-patch-bytes: "1000000"
           max-file-patch-bytes: "250000"
-      - name: Verify exact head, incremental review plan, and bounded packet
+      - id: synthetic
+        name: Create bound synthetic review result
         env:
-          SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
           PACKET_FILE: ${{ steps.attention.outputs.review-packet-file }}
+          PACKET_SHA256: ${{ steps.attention.outputs.packet-sha256 }}
+        run: |
+          out="${RUNNER_TEMP}/jarvis-pr-attention-synthetic-review-result.json"
+          python3 - "$PACKET_FILE" "$PACKET_SHA256" "$out" <<'PY'
+          import json, sys
+          packet_path, digest, output = sys.argv[1:]
+          with open(packet_path, encoding="utf-8") as handle:
+              packet = json.load(handle)
+          result = {
+              "schema_version": 1,
+              "repository": packet["repository"],
+              "pr_number": packet["pr_number"],
+              "accepted_head_sha": packet["accepted_head_sha"],
+              "head_sha": packet["head_sha"],
+              "packet_sha256": digest,
+              "reviewer": {"name": "ci-dogfood", "model": "deterministic-fixture"},
+              "verdict": "PASS",
+              "reviewed_files": [item["path"] for item in packet["files"]],
+              "findings": [],
+              "notes": ["Synthetic fixture used only to dogfood result validation."],
+          }
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(result, handle, sort_keys=True, indent=2)
+              handle.write("\n")
+          PY
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+      - id: validated
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          accepted-head: ${{ steps.baseline.outputs.sha }}
+          max-total-patch-bytes: "1000000"
+          max-file-patch-bytes: "250000"
+          review-result-file: ${{ steps.synthetic.outputs.path }}
+      - name: Verify exact head, packet, and structured review result binding
+        env:
+          SNAPSHOT_FILE: ${{ steps.validated.outputs.snapshot-file }}
+          PACKET_FILE: ${{ steps.validated.outputs.review-packet-file }}
+          VALIDATION_FILE: ${{ steps.validated.outputs.review-result-validation-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           EXPECTED_BASELINE: ${{ steps.baseline.outputs.sha }}
-          REVIEW_SCOPE: ${{ steps.attention.outputs.review-scope }}
-          NEXT_ACTION: ${{ steps.attention.outputs.next-action-class }}
-          PACKET_COVERAGE: ${{ steps.attention.outputs.packet-coverage }}
-          PACKET_COMPLETE: ${{ steps.attention.outputs.packet-complete }}
+          REVIEW_SCOPE: ${{ steps.validated.outputs.review-scope }}
+          NEXT_ACTION: ${{ steps.validated.outputs.next-action-class }}
+          PACKET_COVERAGE: ${{ steps.validated.outputs.packet-coverage }}
+          PACKET_COMPLETE: ${{ steps.validated.outputs.packet-complete }}
+          FIRST_PACKET_SHA256: ${{ steps.attention.outputs.packet-sha256 }}
+          SECOND_PACKET_SHA256: ${{ steps.validated.outputs.packet-sha256 }}
+          REVIEW_RESULT_STATUS: ${{ steps.validated.outputs.review-result-status }}
+          REVIEW_RESULT_VALID: ${{ steps.validated.outputs.review-result-valid }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -54,6 +97,8 @@ jobs:
               snapshot = json.load(handle)
           with open(os.environ["PACKET_FILE"], encoding="utf-8") as handle:
               packet = json.load(handle)
+          with open(os.environ["VALIDATION_FILE"], encoding="utf-8") as handle:
+              validation = json.load(handle)
           assert snapshot["schema_version"] == 2
           assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
@@ -75,4 +120,13 @@ jobs:
           assert packet["files"]
           assert os.environ["PACKET_COVERAGE"] == "COMPLETE"
           assert os.environ["PACKET_COMPLETE"] == "true"
+          assert os.environ["FIRST_PACKET_SHA256"].startswith("sha256:")
+          assert os.environ["FIRST_PACKET_SHA256"] == os.environ["SECOND_PACKET_SHA256"]
+          assert os.environ["REVIEW_RESULT_STATUS"] == "VALID_PASS"
+          assert os.environ["REVIEW_RESULT_VALID"] == "true"
+          assert validation["valid"] is True
+          assert validation["status"] == "VALID_PASS"
+          assert validation["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert validation["live_head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert validation["packet_sha256"] == os.environ["SECOND_PACKET_SHA256"]
           PY

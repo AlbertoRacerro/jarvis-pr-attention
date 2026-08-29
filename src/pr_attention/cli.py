@@ -15,11 +15,19 @@ from .packet import (
     DEFAULT_MAX_TOTAL_PATCH_BYTES,
     collect_review_packet,
 )
+from .review_result import load_json_object, packet_sha256, validate_review_result
 from .normalize import normalize_checks, normalize_delta, normalize_reviews, normalize_threads
 from .render import render_packet_text, render_text
 
 EXIT_CODES = {"READY": 0, "PENDING": 10, "BLOCKED": 20, "STALE": 30, "UNKNOWN": 40}
 PACKET_EXIT_CODES = {"COMPLETE": 0, "PARTIAL": 50, "NONE": 60, "UNKNOWN": 70}
+RESULT_EXIT_CODES = {
+    "VALID_PASS": 0,
+    "VALID_FAIL": 80,
+    "VALID_NEEDS_HUMAN": 81,
+    "STALE": 82,
+    "INVALID": 83,
+}
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -131,12 +139,68 @@ def build_parser() -> argparse.ArgumentParser:
     packet.add_argument("--json", action="store_true", dest="json_output")
     packet.add_argument("--output", help="write JSON review packet to a file")
     packet.add_argument("--no-coverage-exit", action="store_true", help="always exit 0 after successful packet retrieval")
+
+    digest = sub.add_parser("packet-digest", help="compute the stable SHA-256 identity of a review packet")
+    digest.add_argument("packet_file")
+    digest.add_argument("--json", action="store_true", dest="json_output")
+
+    validation = sub.add_parser("validate-review-result", help="validate a structured reviewer verdict against an exact review packet")
+    validation.add_argument("packet_file")
+    validation.add_argument("result_file")
+    validation.add_argument("--live", action="store_true", help="also require the live pull request head to still match the reviewed head")
+    validation.add_argument("--json", action="store_true", dest="json_output")
+    validation.add_argument("--output", help="write JSON validation result to a file")
+    validation.add_argument("--no-validation-exit", action="store_true", help="always exit 0 after validation, even for FAIL/STALE/INVALID")
     return parser
+
+
+def _render_result_validation(validation) -> str:
+    lines = [
+        f"Review result: {validation.status}",
+        f"Valid: {'yes' if validation.valid else 'no'}",
+        f"Head: {validation.head_sha or '-'}",
+        f"Verdict: {validation.verdict or '-'}",
+        f"Packet: {validation.packet_sha256 or '-'}",
+    ]
+    if validation.live_head_sha:
+        lines.append(f"Live head: {validation.live_head_sha}")
+    if validation.reasons:
+        lines.append("Reasons:")
+        lines.extend(f"  - {reason}" for reason in validation.reasons)
+    return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "packet-digest":
+            packet = load_json_object(args.packet_file)
+            digest = packet_sha256(packet)
+            print(json.dumps({"packet_sha256": digest}, sort_keys=True) if args.json_output else digest)
+            return 0
+
+        if args.command == "validate-review-result":
+            packet = load_json_object(args.packet_file)
+            review_result = load_json_object(args.result_file)
+            live_head_sha = None
+            if args.live:
+                repository = packet.get("repository")
+                pr_number = packet.get("pr_number")
+                if not isinstance(repository, str) or not repository or not isinstance(pr_number, int) or isinstance(pr_number, bool):
+                    raise ValueError("--live requires valid repository and pr_number fields in the review packet")
+                client = GitHubClient.from_env()
+                pr = client.pull_request(repository, pr_number)
+                live_head_sha = str(((pr.get("head") or {}).get("sha") or ""))
+                if not live_head_sha:
+                    raise GitHubError("pull request response did not contain live head SHA")
+            validation = validate_review_result(packet, review_result, live_head_sha=live_head_sha)
+            payload = json.dumps(validation.to_dict(), sort_keys=True, indent=2)
+            if args.output:
+                with open(args.output, "w", encoding="utf-8") as handle:
+                    handle.write(payload + "\n")
+            print(payload if args.json_output else _render_result_validation(validation))
+            return 0 if args.no_validation_exit else RESULT_EXIT_CODES[validation.status]
+
         client = GitHubClient.from_env()
         if args.command == "snapshot":
             result = collect_snapshot(
@@ -167,6 +231,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 handle.write(payload + "\n")
         print(payload if args.json_output else render_packet_text(result))
         return 0 if args.no_coverage_exit else PACKET_EXIT_CODES[result.coverage]
-    except (GitHubError, ValueError) as exc:
+    except (GitHubError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"pr-attention: {exc}", file=sys.stderr)
-        return 40 if args.command == "snapshot" else 70
+        if args.command == "snapshot":
+            return 40
+        if args.command == "review-packet":
+            return 70
+        return 83
