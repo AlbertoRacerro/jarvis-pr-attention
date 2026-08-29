@@ -1,0 +1,160 @@
+name: "Jarvis PR Attention Cycle"
+description: "Run one compact V1.11 exact-head review/re-review orchestration cycle without repository writes"
+author: "Alberto Racerro"
+
+inputs:
+  pr-number:
+    description: "Pull request number"
+    required: true
+  repository:
+    description: "owner/repository; defaults to the current repository"
+    required: false
+    default: ${{ github.repository }}
+  token:
+    description: "GitHub token with read access to pull requests, checks, statuses, branch rules, reviews and compare data"
+    required: false
+    default: ${{ github.token }}
+  accepted-head:
+    description: "Last semantically accepted exact head for ordinary delta review; mutually exclusive with previous-failed-source-file"
+    required: false
+    default: ""
+  previous-failed-source-file:
+    description: "Prior failed evidence bundle or V1.11 checkpoint; activates multi-generation continuity mode"
+    required: false
+    default: ""
+  review-result-file:
+    description: "Optional ordinary structured review result JSON"
+    required: false
+    default: ""
+  continuity-result-file:
+    description: "Optional V1.11 continuity structured review result JSON"
+    required: false
+    default: ""
+  reviewer-name:
+    description: "Reviewer identity prefilled into the generated handoff"
+    required: false
+    default: "external-reviewer"
+  reviewer-model:
+    description: "Optional reviewer model/runtime label"
+    required: false
+    default: ""
+  max-total-patch-bytes:
+    description: "Maximum aggregate UTF-8 patch bytes"
+    required: false
+    default: "120000"
+  max-file-patch-bytes:
+    description: "Maximum UTF-8 patch bytes for one file"
+    required: false
+    default: "30000"
+  max-thread-bytes:
+    description: "Maximum UTF-8 bytes for one pertinent review thread"
+    required: false
+    default: "4000"
+  max-total-thread-bytes:
+    description: "Maximum aggregate UTF-8 review-thread bytes"
+    required: false
+    default: "40000"
+  max-threads:
+    description: "Maximum pertinent unresolved current review threads"
+    required: false
+    default: "50"
+
+outputs:
+  manifest-file:
+    description: "Compact cycle manifest JSON"
+    value: ${{ steps.cycle.outputs.manifest-file }}
+  head-sha:
+    description: "Exact PR head used by this cycle"
+    value: ${{ steps.cycle.outputs.head-sha }}
+  attention:
+    description: "READY, PENDING, BLOCKED, STALE or UNKNOWN"
+    value: ${{ steps.cycle.outputs.attention }}
+  review-mode:
+    description: "FULL, DELTA, CONTINUITY or NONE"
+    value: ${{ steps.cycle.outputs.review-mode }}
+  next-action:
+    description: "Deterministic next action for the caller"
+    value: ${{ steps.cycle.outputs.next-action }}
+  gate-status:
+    description: "Advisory integration gate status, or NOT_RUN"
+    value: ${{ steps.cycle.outputs.gate-status }}
+  merge-candidate:
+    description: "true only when current evidence is an advisory exact-head merge candidate"
+    value: ${{ steps.cycle.outputs.merge-candidate }}
+  checkpoint-file:
+    description: "Reusable failed-review checkpoint; empty after a valid PASS or when no failed lineage exists"
+    value: ${{ steps.cycle.outputs.checkpoint-file }}
+  review-envelope-file:
+    description: "Reviewer handoff envelope for the current ordinary or continuity cycle"
+    value: ${{ steps.cycle.outputs.review-envelope-file }}
+  review-result-template-file:
+    description: "Structured reviewer result template bound to current evidence"
+    value: ${{ steps.cycle.outputs.review-result-template-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: cycle
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PYTHONPATH: ${{ github.action_path }}/../src
+        ACCEPTED_HEAD: ${{ inputs.accepted-head }}
+        PREVIOUS_FAILED_SOURCE_FILE: ${{ inputs.previous-failed-source-file }}
+        REVIEW_RESULT_FILE: ${{ inputs.review-result-file }}
+        CONTINUITY_RESULT_FILE: ${{ inputs.continuity-result-file }}
+        REVIEWER_NAME: ${{ inputs.reviewer-name }}
+        REVIEWER_MODEL: ${{ inputs.reviewer-model }}
+      run: |
+        set -euo pipefail
+        outdir="${RUNNER_TEMP}/jarvis-pr-attention-cycle-${{ inputs.pr-number }}"
+        manifest="${outdir}/cycle.json"
+        args=(
+          "${{ inputs.repository }}"
+          "${{ inputs.pr-number }}"
+          --reviewer-name "$REVIEWER_NAME"
+          --max-total-patch-bytes "${{ inputs.max-total-patch-bytes }}"
+          --max-file-patch-bytes "${{ inputs.max-file-patch-bytes }}"
+          --max-thread-bytes "${{ inputs.max-thread-bytes }}"
+          --max-total-thread-bytes "${{ inputs.max-total-thread-bytes }}"
+          --max-threads "${{ inputs.max-threads }}"
+          --output-dir "$outdir"
+          --output "$manifest"
+        )
+        if [[ -n "$ACCEPTED_HEAD" ]]; then args+=(--accepted-head "$ACCEPTED_HEAD"); fi
+        if [[ -n "$PREVIOUS_FAILED_SOURCE_FILE" ]]; then args+=(--previous-failed-source-file "$PREVIOUS_FAILED_SOURCE_FILE"); fi
+        if [[ -n "$REVIEW_RESULT_FILE" ]]; then args+=(--review-result-file "$REVIEW_RESULT_FILE"); fi
+        if [[ -n "$CONTINUITY_RESULT_FILE" ]]; then args+=(--continuity-result-file "$CONTINUITY_RESULT_FILE"); fi
+        if [[ -n "$REVIEWER_MODEL" ]]; then args+=(--reviewer-model "$REVIEWER_MODEL"); fi
+
+        python3 -m pr_attention.cycle_cli "${args[@]}"
+
+        readarray -t values < <(python3 - "$manifest" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            data = json.load(handle)
+        artifacts = data.get("artifacts", {})
+        print(data["head_sha"])
+        print(data["attention"])
+        print(data["review_mode"])
+        print(data["next_action"])
+        print(data["gate_status"])
+        print(str(data["merge_candidate"]).lower())
+        print(artifacts.get("checkpoint_file", ""))
+        print(artifacts.get("review_envelope_file", ""))
+        print(artifacts.get("review_result_template_file", ""))
+        PY
+        )
+
+        {
+          echo "manifest-file=$manifest"
+          echo "head-sha=${values[0]}"
+          echo "attention=${values[1]}"
+          echo "review-mode=${values[2]}"
+          echo "next-action=${values[3]}"
+          echo "gate-status=${values[4]}"
+          echo "merge-candidate=${values[5]}"
+          echo "checkpoint-file=${values[6]}"
+          echo "review-envelope-file=${values[7]}"
+          echo "review-result-template-file=${values[8]}"
+        } >> "$GITHUB_OUTPUT"
