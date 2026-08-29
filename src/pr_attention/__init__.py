@@ -8,6 +8,8 @@ from .integration_gate import build_integration_gate
 from .metrics import measure_compaction
 from .packet import collect_review_packet
 from .review_result import packet_sha256, validate_review_result
+from .rereview_packet import build_rereview_packet, collect_rereview_packet, rereview_packet_sha256
+from .rereview_result import build_rereview_result_template, validate_rereview_result
 
 __all__ = [
     "collect_snapshot",
@@ -23,5 +25,10 @@ __all__ = [
     "build_attention_digest",
     "build_repair_packet",
     "measure_compaction",
+    "build_rereview_packet",
+    "collect_rereview_packet",
+    "rereview_packet_sha256",
+    "build_rereview_result_template",
+    "validate_rereview_result",
 ]
-__version__ = "0.9.0"
+__version__ = "0.10.0"
