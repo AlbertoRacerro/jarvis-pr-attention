@@ -1,8 +1,8 @@
 # jarvis-pr-attention
 
-Deterministic exact-head PR attention snapshots, incremental review plans, bounded delta review packets, and structured review-result validation for agentic software delivery.
+Deterministic exact-head PR attention snapshots, incremental review plans, bounded delta review packets, reviewer handoff artifacts, and structured review-result validation for agentic software delivery.
 
-`jarvis-pr-attention` is a small, read-only GitHub fact collector. It turns live pull-request state into machine-readable evidence without using an LLM and without becoming a second source of truth.
+`jarvis-pr-attention` is a small, read-only GitHub fact collector. It turns live pull-request state into machine-readable evidence without invoking an LLM and without becoming a second source of truth.
 
 ## Design
 
@@ -17,10 +17,11 @@ Deterministic exact-head PR attention snapshots, incremental review plans, bound
 - Accepted-head evidence is reused only when GitHub proves the accepted head is the current head or an ancestor of it.
 - Diverged/behind baselines and incomplete large compare results fail closed to full review.
 - Reviewer-produced results are treated as claims and are accepted only when they bind exactly to the packet/head they reviewed.
+- Patch text remains explicitly untrusted throughout reviewer handoff.
 
 ## CLI
 
-Requires Python 3.11+. GitHub-reading commands require `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository. Packet digesting and non-live review-result validation work offline.
+Requires Python 3.11+. GitHub-reading commands require `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository. Packet digesting, reviewer handoff generation, and non-live result validation work offline.
 
 ```bash
 PYTHONPATH=src python -m pr_attention snapshot owner/repo 123
@@ -104,7 +105,7 @@ Review-packet exit codes are `0=COMPLETE`, `50=PARTIAL`, `60=NONE`, `70=UNKNOWN/
 
 ## Structured review results
 
-V0.4 adds a deterministic contract for the result produced by an external semantic reviewer such as ChatGPT, Claude, GLM, or a human review service. `jarvis-pr-attention` still does not perform the review itself.
+A deterministic contract binds the result produced by an external semantic reviewer such as ChatGPT, Claude, GLM, or a human review service. `jarvis-pr-attention` still does not perform the review itself.
 
 Compute the stable identity of a packet:
 
@@ -130,7 +131,34 @@ Validation statuses are `VALID_PASS`, `VALID_FAIL`, `VALID_NEEDS_HUMAN`, `STALE`
 
 The packet digest deliberately excludes transient fields such as generation time and current CI attention, so an unchanged reviewed code delta retains the same identity while gates move from pending to green. Any change to the actual packet evidence changes the digest.
 
-See [docs/REVIEW_RESULT_CONTRACT.md](docs/REVIEW_RESULT_CONTRACT.md) for the exact JSON schema, finding rules, validation semantics, and exit codes.
+`packet_sha256` is a content identity, **not a digital signature or provenance proof**. Offline validation proves result-to-packet binding. For trusted GitHub-source binding, use live regeneration/validation.
+
+See [docs/REVIEW_RESULT_CONTRACT.md](docs/REVIEW_RESULT_CONTRACT.md) for the exact result schema and validation semantics.
+
+## Reviewer handoff
+
+Generate a safe result template already bound to a packet:
+
+```bash
+PYTHONPATH=src python -m pr_attention review-result-template packet.json \
+  --reviewer-name ChatGPT \
+  --reviewer-model GPT-5.6-Sol \
+  --output review-result.json
+```
+
+The default template is conservative: `verdict=NEEDS_HUMAN`, `reviewed_files=[]`, and no findings. Files are never declared reviewed merely because they were delivered. `--prefill-reviewed-files` is an explicit opt-in for mechanical clients.
+
+Generate a complete machine-readable handoff envelope:
+
+```bash
+PYTHONPATH=src python -m pr_attention review-envelope packet.json \
+  --reviewer-name Claude \
+  --output review-envelope.json
+```
+
+The envelope contains fixed tool-generated safety notices, the expected output contract, required file paths, the bound result template, and the original packet exactly once. Repository patches cannot redefine the handoff rules and remain marked `UNTRUSTED_REPOSITORY_CONTENT`.
+
+See [docs/REVIEWER_HANDOFF.md](docs/REVIEWER_HANDOFF.md) for the model-agnostic flow and trust boundary.
 
 ## Snapshot fields
 
@@ -162,14 +190,16 @@ steps:
     with:
       pr-number: ${{ github.event.pull_request.number }}
       accepted-head: ${{ steps.authority.outputs.last-accepted-head }}
+      reviewer-name: ChatGPT
   - run: |
       echo "attention=${{ steps.attention.outputs.attention }}"
       echo "next=${{ steps.attention.outputs.next-action-class }}"
       echo "scope=${{ steps.attention.outputs.review-scope }}"
       echo "packet=${{ steps.attention.outputs.packet-sha256 }}"
+      echo "envelope=${{ steps.attention.outputs.review-envelope-file }}"
 ```
 
-Action outputs include `attention`, `head-sha`, `next-action-class`, `review-scope`, `delta-files`, `snapshot-file`, `review-packet-file`, `packet-coverage`, `packet-complete`, `packet-patch-bytes`, and `packet-sha256`.
+When `accepted-head` is supplied, Action outputs include snapshot/packet evidence plus `packet-sha256`, `review-result-template-file`, and `review-envelope-file`.
 
 If `review-result-file` is supplied, the Action regenerates the packet, validates the structured result against it and the live PR head, then emits `review-result-status`, `review-result-valid`, and `review-result-validation-file`. These remain evidence only; the Action never approves or merges.
 
