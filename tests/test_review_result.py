@@ -50,6 +50,18 @@ def result(p, *, verdict="PASS", reviewed_files=None, findings=None):
     }
 
 
+def blocking_finding():
+    return {
+        "id": "F1",
+        "severity": "P1",
+        "blocking": True,
+        "title": "Broken invariant",
+        "detail": "The changed code violates the contract.",
+        "path": "a.py",
+        "line": 1,
+    }
+
+
 class ReviewResultTests(unittest.TestCase):
     def test_digest_ignores_transient_packet_fields(self):
         first = packet()
@@ -74,16 +86,7 @@ class ReviewResultTests(unittest.TestCase):
 
     def test_valid_fail_requires_blocker(self):
         p = packet()
-        finding = {
-            "id": "F1",
-            "severity": "P1",
-            "blocking": True,
-            "title": "Broken invariant",
-            "detail": "The changed code violates the contract.",
-            "path": "a.py",
-            "line": 1,
-        }
-        validation = validate_review_result(p, result(p, verdict="FAIL", findings=[finding]))
+        validation = validate_review_result(p, result(p, verdict="FAIL", findings=[blocking_finding()]))
         self.assertEqual(validation.status, "VALID_FAIL")
         self.assertTrue(validation.valid)
 
@@ -112,10 +115,17 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(validation.status, "INVALID")
         self.assertTrue(any("COMPLETE" in reason for reason in validation.reasons))
 
-    def test_pass_rejects_stale_packet(self):
+    def test_stale_packet_returns_stale_for_pass(self):
         p = packet(final_head="c" * 40)
         validation = validate_review_result(p, result(p))
-        self.assertEqual(validation.status, "INVALID")
+        self.assertEqual(validation.status, "STALE")
+        self.assertFalse(validation.valid)
+
+    def test_stale_packet_returns_stale_for_fail(self):
+        p = packet(final_head="c" * 40)
+        validation = validate_review_result(p, result(p, verdict="FAIL", findings=[blocking_finding()]))
+        self.assertEqual(validation.status, "STALE")
+        self.assertFalse(validation.valid)
 
     def test_pass_requires_every_packet_file_reviewed(self):
         p = packet()
@@ -211,6 +221,28 @@ class ReviewResultTests(unittest.TestCase):
         p = packet()
         r = result(p)
         r["reviewer"] = {}
+        validation = validate_review_result(p, r)
+        self.assertEqual(validation.status, "INVALID")
+
+    def test_boolean_packet_schema_is_not_integer_one(self):
+        p = packet()
+        p["schema_version"] = True
+        r = result(p)
+        validation = validate_review_result(p, r)
+        self.assertEqual(validation.status, "INVALID")
+
+    def test_boolean_result_schema_is_not_integer_one(self):
+        p = packet()
+        r = result(p)
+        r["schema_version"] = True
+        validation = validate_review_result(p, r)
+        self.assertEqual(validation.status, "INVALID")
+
+    def test_boolean_result_pr_number_does_not_alias_one(self):
+        p = packet()
+        p["pr_number"] = 1
+        r = result(p)
+        r["pr_number"] = True
         validation = validate_review_result(p, r)
         self.assertEqual(validation.status, "INVALID")
 
