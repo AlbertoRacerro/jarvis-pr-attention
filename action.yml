@@ -75,6 +75,12 @@ runs:
           args+=(--accepted-head "$ACCEPTED_HEAD")
         fi
         python3 -m pr_attention "${args[@]}" >/dev/null
+        snapshot_head=$(python3 - "$out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            print(json.load(handle)["head_sha"])
+        PY
+        )
 
         packet_out=""
         packet_coverage="NONE"
@@ -84,6 +90,7 @@ runs:
           packet_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-review-packet.json"
           python3 -m pr_attention review-packet "${{ inputs.repository }}" "${{ inputs.pr-number }}" \
             --accepted-head "$ACCEPTED_HEAD" \
+            --expected-head "$snapshot_head" \
             --max-total-patch-bytes "$MAX_TOTAL_PATCH_BYTES" \
             --max-file-patch-bytes "$MAX_FILE_PATCH_BYTES" \
             --json --output "$packet_out" --no-coverage-exit >/dev/null
