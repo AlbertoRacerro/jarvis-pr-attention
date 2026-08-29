@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate a deterministic exact-head PR attention snapshot and review plan"
+description: "Generate deterministic exact-head PR attention, review plans, and bounded delta packets"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -17,6 +17,14 @@ inputs:
     description: "Last semantically accepted full commit SHA; enables incremental review planning"
     required: false
     default: ""
+  max-total-patch-bytes:
+    description: "Maximum aggregate UTF-8 patch bytes in the review packet"
+    required: false
+    default: "120000"
+  max-file-patch-bytes:
+    description: "Maximum UTF-8 patch bytes included for any one file"
+    required: false
+    default: "30000"
 outputs:
   attention:
     description: "READY, PENDING, BLOCKED, STALE or UNKNOWN"
@@ -36,6 +44,18 @@ outputs:
   snapshot-file:
     description: "Path to the JSON snapshot"
     value: ${{ steps.snapshot.outputs.snapshot-file }}
+  review-packet-file:
+    description: "Path to bounded JSON review packet; empty when accepted-head is not supplied"
+    value: ${{ steps.snapshot.outputs.review-packet-file }}
+  packet-coverage:
+    description: "COMPLETE, PARTIAL, NONE or UNKNOWN"
+    value: ${{ steps.snapshot.outputs.packet-coverage }}
+  packet-complete:
+    description: "true only when all required delta patch evidence fits and is available"
+    value: ${{ steps.snapshot.outputs.packet-complete }}
+  packet-patch-bytes:
+    description: "UTF-8 patch bytes included in the review packet"
+    value: ${{ steps.snapshot.outputs.packet-patch-bytes }}
 runs:
   using: "composite"
   steps:
@@ -45,6 +65,8 @@ runs:
         GITHUB_TOKEN: ${{ inputs.token }}
         PYTHONPATH: ${{ github.action_path }}/src
         ACCEPTED_HEAD: ${{ inputs.accepted-head }}
+        MAX_TOTAL_PATCH_BYTES: ${{ inputs.max-total-patch-bytes }}
+        MAX_FILE_PATCH_BYTES: ${{ inputs.max-file-patch-bytes }}
       run: |
         set -euo pipefail
         out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}.json"
@@ -53,9 +75,35 @@ runs:
           args+=(--accepted-head "$ACCEPTED_HEAD")
         fi
         python3 -m pr_attention "${args[@]}" >/dev/null
-        python3 - "$out" "$GITHUB_OUTPUT" <<'PY'
+
+        packet_out=""
+        packet_coverage="NONE"
+        packet_complete="false"
+        packet_patch_bytes="0"
+        if [[ -n "$ACCEPTED_HEAD" ]]; then
+          packet_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-review-packet.json"
+          python3 -m pr_attention review-packet "${{ inputs.repository }}" "${{ inputs.pr-number }}" \
+            --accepted-head "$ACCEPTED_HEAD" \
+            --max-total-patch-bytes "$MAX_TOTAL_PATCH_BYTES" \
+            --max-file-patch-bytes "$MAX_FILE_PATCH_BYTES" \
+            --json --output "$packet_out" --no-coverage-exit >/dev/null
+          readarray -t packet_values < <(python3 - "$packet_out" <<'PY'
         import json, sys
-        path, output = sys.argv[1:]
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            packet = json.load(handle)
+        print(packet["coverage"])
+        print(str(packet["complete"]).lower())
+        print(packet["included_patch_bytes"])
+        PY
+          )
+          packet_coverage="${packet_values[0]}"
+          packet_complete="${packet_values[1]}"
+          packet_patch_bytes="${packet_values[2]}"
+        fi
+
+        python3 - "$out" "$GITHUB_OUTPUT" "$packet_out" "$packet_coverage" "$packet_complete" "$packet_patch_bytes" <<'PY'
+        import json, sys
+        path, output, packet_path, coverage, complete, patch_bytes = sys.argv[1:]
         with open(path, encoding="utf-8") as handle:
             snapshot = json.load(handle)
         values = {
@@ -65,6 +113,10 @@ runs:
             "review-scope": snapshot["delta"]["review_scope"],
             "delta-files": snapshot["delta"]["changed_files"],
             "snapshot-file": path,
+            "review-packet-file": packet_path,
+            "packet-coverage": coverage,
+            "packet-complete": complete,
+            "packet-patch-bytes": patch_bytes,
         }
         with open(output, "a", encoding="utf-8") as handle:
             for key, value in values.items():
