@@ -1,0 +1,42 @@
+name: "Jarvis PR Attention"
+description: "Generate a deterministic exact-head PR attention snapshot"
+author: "Alberto Racerro"
+inputs:
+  pr-number:
+    description: "Pull request number"
+    required: true
+  repository:
+    description: "owner/repository; defaults to the current repository"
+    required: false
+    default: ${{ github.repository }}
+  token:
+    description: "GitHub token with read access to pull requests, checks and statuses"
+    required: false
+    default: ${{ github.token }}
+outputs:
+  attention:
+    description: "READY, PENDING, BLOCKED, STALE or UNKNOWN"
+    value: ${{ steps.snapshot.outputs.attention }}
+  head-sha:
+    description: "Exact head SHA the snapshot was collected for"
+    value: ${{ steps.snapshot.outputs.head-sha }}
+  snapshot-file:
+    description: "Path to the JSON snapshot"
+    value: ${{ steps.snapshot.outputs.snapshot-file }}
+runs:
+  using: "composite"
+  steps:
+    - id: snapshot
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PYTHONPATH: ${{ github.action_path }}/src
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}.json"
+        python3 -m pr_attention snapshot "${{ inputs.repository }}" "${{ inputs.pr-number }}" --json --output "$out" --no-state-exit >/dev/null
+        attention="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["attention"])' "$out")"
+        head_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["head_sha"])' "$out")"
+        echo "attention=$attention" >> "$GITHUB_OUTPUT"
+        echo "head-sha=$head_sha" >> "$GITHUB_OUTPUT"
+        echo "snapshot-file=$out" >> "$GITHUB_OUTPUT"

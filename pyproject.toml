@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-pr-attention"
+version = "0.1.0"
+description = "Deterministic exact-head PR attention snapshots for agentic software delivery."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Alberto Racerro"}]
+
+[project.scripts]
+pr-attention = "pr_attention.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
