@@ -5,10 +5,11 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Any, Sequence
 
 from .classify import classify_attention, classify_next_action
 from .github import GitHubClient, GitHubError
+from .handoff import build_review_envelope, build_review_result_template
 from .models import MergeSummary, ScopeSummary, Snapshot
 from .packet import (
     DEFAULT_MAX_FILE_PATCH_BYTES,
@@ -144,6 +145,19 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("packet_file")
     digest.add_argument("--json", action="store_true", dest="json_output")
 
+    template = sub.add_parser("review-result-template", help="create a reviewer result JSON template already bound to a packet")
+    template.add_argument("packet_file")
+    template.add_argument("--reviewer-name", required=True)
+    template.add_argument("--reviewer-model")
+    template.add_argument("--prefill-reviewed-files", action="store_true", help="explicitly prefill reviewed_files with every packet file")
+    template.add_argument("--output", help="write the JSON template to a file")
+
+    envelope = sub.add_parser("review-envelope", help="create a deterministic reviewer handoff envelope around a packet")
+    envelope.add_argument("packet_file")
+    envelope.add_argument("--reviewer-name", required=True)
+    envelope.add_argument("--reviewer-model")
+    envelope.add_argument("--output", help="write the JSON envelope to a file")
+
     validation = sub.add_parser("validate-review-result", help="validate a structured reviewer verdict against an exact review packet")
     validation.add_argument("packet_file")
     validation.add_argument("result_file")
@@ -170,6 +184,14 @@ def _render_result_validation(validation) -> str:
     return "\n".join(lines)
 
 
+def _emit_json(payload: dict[str, Any], output: str | None = None) -> None:
+    text = json.dumps(payload, sort_keys=True, indent=2)
+    if output:
+        with open(output, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    print(text)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -177,6 +199,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             packet = load_json_object(args.packet_file)
             digest = packet_sha256(packet)
             print(json.dumps({"packet_sha256": digest}, sort_keys=True) if args.json_output else digest)
+            return 0
+
+        if args.command == "review-result-template":
+            packet = load_json_object(args.packet_file)
+            result_template = build_review_result_template(
+                packet,
+                reviewer_name=args.reviewer_name,
+                reviewer_model=args.reviewer_model,
+                prefill_reviewed_files=args.prefill_reviewed_files,
+            )
+            _emit_json(result_template, args.output)
+            return 0
+
+        if args.command == "review-envelope":
+            packet = load_json_object(args.packet_file)
+            review_envelope = build_review_envelope(
+                packet,
+                reviewer_name=args.reviewer_name,
+                reviewer_model=args.reviewer_model,
+            )
+            _emit_json(review_envelope, args.output)
             return 0
 
         if args.command == "validate-review-result":
