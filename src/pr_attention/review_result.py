@@ -81,12 +81,13 @@ def _invalid(
     *,
     live_head_sha: str | None = None,
 ) -> ReviewResultValidation:
+    packet_pr_number = packet.get("pr_number")
     return ReviewResultValidation(
         schema_version=VALIDATION_SCHEMA_VERSION,
         valid=False,
         status="INVALID",
         repository=packet.get("repository") if isinstance(packet.get("repository"), str) else None,
-        pr_number=packet.get("pr_number") if isinstance(packet.get("pr_number"), int) else None,
+        pr_number=(packet_pr_number if isinstance(packet_pr_number, int) and not isinstance(packet_pr_number, bool) else None),
         head_sha=packet.get("head_sha") if isinstance(packet.get("head_sha"), str) else None,
         packet_sha256=packet_sha256(packet),
         verdict=result.get("verdict") if isinstance(result.get("verdict"), str) else None,
@@ -103,7 +104,8 @@ def validate_review_result(
 ) -> ReviewResultValidation:
     reasons: list[str] = []
 
-    if packet.get("schema_version") != 1:
+    packet_schema = packet.get("schema_version")
+    if not isinstance(packet_schema, int) or isinstance(packet_schema, bool) or packet_schema != 1:
         reasons.append("unsupported review packet schema_version")
     repository = packet.get("repository")
     pr_number = packet.get("pr_number")
@@ -142,14 +144,18 @@ def validate_review_result(
 
     expected_digest = packet_sha256(packet)
 
-    if result.get("schema_version") != RESULT_SCHEMA_VERSION:
+    result_schema = result.get("schema_version")
+    if not isinstance(result_schema, int) or isinstance(result_schema, bool) or result_schema != RESULT_SCHEMA_VERSION:
         reasons.append("unsupported review result schema_version")
     verdict = result.get("verdict")
     if verdict not in _ALL_VERDICTS:
         reasons.append("review result verdict is invalid")
     if result.get("repository") != repository:
         reasons.append("review result repository does not match packet")
-    if result.get("pr_number") != pr_number:
+    result_pr_number = result.get("pr_number")
+    if not isinstance(result_pr_number, int) or isinstance(result_pr_number, bool) or result_pr_number < 1:
+        reasons.append("review result pr_number is invalid")
+    elif result_pr_number != pr_number:
         reasons.append("review result pr_number does not match packet")
     if result.get("accepted_head_sha") != accepted_head:
         reasons.append("review result accepted_head_sha does not match packet")
@@ -225,8 +231,6 @@ def validate_review_result(
     if verdict == "PASS":
         if packet.get("coverage") != "COMPLETE" or packet.get("complete") is not True:
             reasons.append("PASS requires a COMPLETE review packet")
-        if head_sha != final_head_sha:
-            reasons.append("PASS requires a non-stale packet head")
         missing_reviewed = sorted(set(packet_paths) - set(reviewed_files))
         if missing_reviewed:
             reasons.append("PASS requires every packet file to be reviewed: " + ", ".join(missing_reviewed))
@@ -238,6 +242,20 @@ def validate_review_result(
 
     if reasons:
         return _invalid(packet, result, reasons, live_head_sha=live_head_sha)
+
+    if head_sha != final_head_sha:
+        return ReviewResultValidation(
+            schema_version=VALIDATION_SCHEMA_VERSION,
+            valid=False,
+            status="STALE",
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            packet_sha256=expected_digest,
+            verdict=verdict,
+            live_head_sha=live_head_sha,
+            reasons=["review packet head changed during packet collection"],
+        )
 
     if live_head_sha is not None:
         if not isinstance(live_head_sha, str) or not _FULL_SHA.fullmatch(live_head_sha):
