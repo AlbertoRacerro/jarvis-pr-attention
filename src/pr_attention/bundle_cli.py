@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("snapshot_file")
     build.add_argument("--packet-file")
     build.add_argument("--envelope-file")
+    build.add_argument("--review-result-file")
     build.add_argument("--validation-file")
     build.add_argument("--integration-gate-file")
     build.add_argument("--output")
@@ -48,6 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_json_object(args.snapshot_file),
                 packet=_optional(args.packet_file),
                 envelope=_optional(args.envelope_file),
+                review_result=_optional(args.review_result_file),
                 validation=_optional(args.validation_file),
                 integration_gate=_optional(args.integration_gate_file),
             )
