@@ -6,6 +6,7 @@ import sys
 from typing import Sequence
 
 from .compact import DEFAULT_MAX_DETAIL_CHARS, DEFAULT_MAX_ITEMS, build_attention_digest, build_repair_packet
+from .metrics import measure_compaction
 from .review_result import load_json_object
 
 
@@ -18,11 +19,12 @@ def _write(payload: dict, output: str | None) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pr-attention-compact", description="Derive bounded agent-facing evidence from a verified PR Attention bundle")
+    parser = argparse.ArgumentParser(prog="pr-attention-compact", description="Derive bounded agent-facing evidence and measurements from a verified PR Attention bundle")
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("digest", "build the compact attention digest without patch bodies"),
         ("repair", "build a bounded repair-evidence packet for a deterministic REPAIR gate"),
+        ("measure", "measure deterministic canonical-byte compaction without estimating model tokens"),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("bundle_file")
@@ -36,10 +38,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         bundle = load_json_object(args.bundle_file)
+        kwargs = {"max_items": args.max_items, "max_detail_chars": args.max_detail_chars}
         if args.command == "digest":
-            payload = build_attention_digest(bundle, max_items=args.max_items, max_detail_chars=args.max_detail_chars)
+            payload = build_attention_digest(bundle, **kwargs)
+        elif args.command == "repair":
+            payload = build_repair_packet(bundle, **kwargs)
         else:
-            payload = build_repair_packet(bundle, max_items=args.max_items, max_detail_chars=args.max_detail_chars)
+            payload = measure_compaction(bundle, **kwargs)
         _write(payload, args.output)
         return 0
     except (ValueError, OSError, json.JSONDecodeError) as exc:
