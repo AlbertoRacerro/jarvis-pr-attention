@@ -15,6 +15,7 @@ from .continuity_guard import (
     failed_checkpoint_from_rereview_bundle,
     validate_lineage_result,
 )
+from .cycle import run_cycle
 from .evidence_bundle import build_evidence_bundle, bundle_sha256, verify_evidence_bundle
 from .handoff import build_review_envelope, build_review_result_template
 from .integration_gate import build_integration_gate
@@ -65,7 +66,8 @@ __all__ = [
     "lineage_packet_sha256",
     "build_lineage_result_template",
     "validate_lineage_result",
+    "run_cycle",
     "normalize_required_checks",
     "normalize_native_review_policy",
 ]
-__version__ = "0.13.0"
+__version__ = "0.13.1"
