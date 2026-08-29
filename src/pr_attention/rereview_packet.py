@@ -350,6 +350,17 @@ def build_rereview_packet(
         )
 
     raw_files = sorted(raw_files, key=lambda item: str(item.get("filename") or ""))
+    if not raw_files:
+        return _terminal_packet(
+            checkpoint,
+            head_sha=current_head_sha,
+            final_head_sha=observed_final,
+            relation=relation,
+            coverage="NONE",
+            reasons=["new commits contain no file-content repair delta; prior blocking findings cannot be cleared by incremental code evidence"],
+            max_total_patch_bytes=max_total_patch_bytes,
+            max_file_patch_bytes=max_file_patch_bytes,
+        )
     if any(not isinstance(item, dict) or not item.get("filename") for item in raw_files):
         return _terminal_packet(
             checkpoint,
