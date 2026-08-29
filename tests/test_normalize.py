@@ -40,6 +40,16 @@ class NormalizeTests(unittest.TestCase):
         s = normalize_reviews([{"user": {"login": "alice"}, "state": "CHANGES_REQUESTED", "commit_id": "head"}], "head")
         self.assertEqual(s.state, "CHANGES_REQUESTED")
 
+    def test_dismissed_latest_review_invalidates_prior_approval(self):
+        reviews = [
+            {"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "head"},
+            {"user": {"login": "alice"}, "state": "DISMISSED", "commit_id": "head"},
+        ]
+        s = normalize_reviews(reviews, "head")
+        self.assertEqual(s.state, "NONE")
+        self.assertEqual(s.current_head_approvals, [])
+        self.assertEqual(s.dismissed_review_count, 1)
+
     def test_threads_separate_current_outdated_resolved(self):
         nodes = [
             {"id": "1", "isResolved": False, "isOutdated": False, "path": "a.py", "comments": {"nodes": [{"author": {"login": "a"}, "body": "x"}]}},

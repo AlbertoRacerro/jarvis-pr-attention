@@ -1,9 +1,13 @@
 name: CI
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
+  checks: read
+  statuses: read
+  pull-requests: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,3 +17,27 @@ jobs:
         with:
           python-version: "3.12"
       - run: PYTHONPATH=src python -m unittest discover -s tests -v
+
+  live-snapshot-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: attention
+        uses: ./
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+      - name: Verify exact head and normalized state
+        env:
+          SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ["SNAPSHOT_FILE"], encoding="utf-8") as handle:
+              snapshot = json.load(handle)
+          assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert snapshot["attention"] in {"READY", "PENDING", "BLOCKED", "UNKNOWN"}
+          assert snapshot["stale"] is False
+          PY

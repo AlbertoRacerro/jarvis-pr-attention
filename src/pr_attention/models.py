@@ -25,6 +25,7 @@ class ReviewSummary:
     current_head_changes_requested: list[str] = field(default_factory=list)
     current_head_commented: list[str] = field(default_factory=list)
     stale_review_count: int = 0
+    dismissed_review_count: int = 0
 
 
 @dataclass(frozen=True)

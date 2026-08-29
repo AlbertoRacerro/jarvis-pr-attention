@@ -91,11 +91,17 @@ class GitHubClient:
         return self.rest_paginated(f"/repos/{repo}/pulls/{number}/reviews?per_page=100")
 
     def check_runs(self, repo: str, head_sha: str) -> list[dict[str, Any]]:
-        payload = self.rest(f"/repos/{repo}/commits/{head_sha}/check-runs?per_page=100")
-        return list((payload or {}).get("check_runs") or [])
+        runs: list[dict[str, Any]] = []
+        for page in range(1, MAX_PAGES + 1):
+            payload = self.rest(f"/repos/{repo}/commits/{head_sha}/check-runs?per_page=100&page={page}")
+            batch = list((payload or {}).get("check_runs") or [])
+            runs.extend(batch)
+            if len(batch) < 100:
+                break
+        return runs
 
     def status_contexts(self, repo: str, head_sha: str) -> list[dict[str, Any]]:
-        payload = self.rest(f"/repos/{repo}/commits/{head_sha}/status")
+        payload = self.rest(f"/repos/{repo}/commits/{head_sha}/status?per_page=100")
         return list((payload or {}).get("statuses") or [])
 
     def review_threads(self, repo: str, number: int) -> list[dict[str, Any]]:

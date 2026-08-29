@@ -80,11 +80,12 @@ def normalize_checks(check_runs: list[dict[str, Any]], status_contexts: list[dic
 def normalize_reviews(reviews: list[dict[str, Any]], head_sha: str) -> ReviewSummary:
     latest_by_user: dict[str, dict[str, Any]] = {}
     stale_count = 0
+    dismissed_count = 0
 
     for review in reviews:
         user = ((review.get("user") or {}).get("login") or "").strip()
         state = str(review.get("state") or "").upper()
-        if not user or state in {"PENDING", "DISMISSED"}:
+        if not user or state == "PENDING":
             continue
         latest_by_user[user] = review
 
@@ -95,6 +96,9 @@ def normalize_reviews(reviews: list[dict[str, Any]], head_sha: str) -> ReviewSum
     for user, review in latest_by_user.items():
         state = str(review.get("state") or "").upper()
         commit_id = str(review.get("commit_id") or "")
+        if state == "DISMISSED":
+            dismissed_count += 1
+            continue
         if commit_id != head_sha:
             stale_count += 1
             continue
@@ -122,6 +126,7 @@ def normalize_reviews(reviews: list[dict[str, Any]], head_sha: str) -> ReviewSum
         current_head_changes_requested=sorted(changes),
         current_head_commented=sorted(commented),
         stale_review_count=stale_count,
+        dismissed_review_count=dismissed_count,
     )
 
 
