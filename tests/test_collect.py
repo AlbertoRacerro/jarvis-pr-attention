@@ -2,6 +2,7 @@ import unittest
 
 import pr_attention
 from pr_attention.cli import collect_snapshot
+from pr_attention.github import GitHubError
 
 
 HEAD = "b" * 40
@@ -19,6 +20,7 @@ class FakeClient:
         sha = HEAD if self.pr_calls == 1 else self.final_head
         return {
             "title": "test",
+            "draft": False,
             "head": {"sha": sha, "ref": "feature"},
             "base": {"ref": "main"},
             "mergeable": True,
@@ -29,7 +31,7 @@ class FakeClient:
         }
 
     def check_runs(self, repo, sha):
-        return [{"name": "test", "status": "completed", "conclusion": "success"}]
+        return [{"name": "test", "status": "completed", "conclusion": "success", "app": {"id": 1}}]
 
     def status_contexts(self, repo, sha):
         return []
@@ -40,6 +42,24 @@ class FakeClient:
     def review_threads(self, repo, number):
         return []
 
+    def branch(self, repo, branch):
+        return {
+            "protected": True,
+            "protection": {
+                "required_status_checks": {
+                    "enforcement_level": "non_admins",
+                    "contexts": ["test"],
+                    "checks": [],
+                }
+            },
+        }
+
+    def branch_rules(self, repo, branch):
+        return []
+
+    def review_policy(self, repo, number):
+        return {"isDraft": False, "reviewDecision": None}
+
     def compare(self, repo, base, head):
         return {
             "status": self.compare_status,
@@ -49,16 +69,26 @@ class FakeClient:
         }
 
 
+class BrokenRulesClient(FakeClient):
+    def branch_rules(self, repo, branch):
+        raise GitHubError("rules unavailable")
+
+
 class CollectTests(unittest.TestCase):
     def test_public_collect_snapshot_export_is_preserved(self):
         self.assertIs(pr_attention.collect_snapshot, collect_snapshot)
 
-    def test_schema_v2_and_delta_review(self):
+    def test_schema_v2_additive_truth_and_delta_review(self):
         s = collect_snapshot(FakeClient(), "o/r", 1, accepted_head_sha=ACCEPTED)
         self.assertEqual(s.schema_version, 2)
         self.assertEqual(s.attention, "READY")
         self.assertEqual(s.delta.review_scope, "DELTA")
         self.assertEqual(s.next_action_class, "REVIEW_DELTA")
+        self.assertTrue(s.checks.required.known)
+        self.assertEqual(s.checks.required.state, "SUCCESS")
+        self.assertTrue(s.reviews.native_policy.known)
+        self.assertFalse(s.reviews.native_policy.draft)
+        self.assertEqual(s.reviews.native_policy.review_decision, "NONE")
 
     def test_current_accepted_head_is_merge_candidate(self):
         s = collect_snapshot(FakeClient(), "o/r", 1, accepted_head_sha=HEAD)
@@ -68,6 +98,13 @@ class CollectTests(unittest.TestCase):
         s = collect_snapshot(FakeClient(final_head="c" * 40), "o/r", 1, accepted_head_sha=ACCEPTED)
         self.assertEqual(s.attention, "STALE")
         self.assertEqual(s.next_action_class, "REFRESH_SNAPSHOT")
+
+    def test_policy_retrieval_failure_fails_closed(self):
+        s = collect_snapshot(BrokenRulesClient(), "o/r", 1, accepted_head_sha=ACCEPTED)
+        self.assertFalse(s.facts_complete)
+        self.assertEqual(s.attention, "UNKNOWN")
+        self.assertFalse(s.checks.required.known)
+        self.assertTrue(any("effective branch rules" in item for item in s.blockers))
 
     def test_invalid_accepted_sha_fails_before_network(self):
         with self.assertRaises(ValueError):
