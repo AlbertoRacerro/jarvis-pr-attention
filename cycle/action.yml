@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention Cycle"
-description: "Run one compact V1.11 exact-head review/re-review orchestration cycle without repository writes"
+description: "Run one strict V1.11 exact-head review/re-review cycle with fail-closed misuse prevention"
 author: "Alberto Racerro"
 
 inputs:
@@ -14,8 +14,20 @@ inputs:
     description: "GitHub token with read access to pull requests, checks, statuses, branch rules, reviews and compare data"
     required: false
     default: ${{ github.token }}
+  expected-head:
+    description: "Optional caller-bound exact PR head. On pull_request events the event head is used automatically when omitted."
+    required: false
+    default: ""
   accepted-head:
-    description: "Last semantically accepted exact head for ordinary delta review; mutually exclusive with previous-failed-source-file"
+    description: "Last semantically accepted exact head. A naked value never reduces review scope in strict mode."
+    required: false
+    default: ""
+  confirm-accepted-head-authority:
+    description: "Must be literal true to reuse accepted-head incrementally; requires accepted-head-source."
+    required: false
+    default: "false"
+  accepted-head-source:
+    description: "Traceable external authority reference for accepted-head, e.g. github-review:123 or governance:record."
     required: false
     default: ""
   previous-failed-source-file:
@@ -26,12 +38,20 @@ inputs:
     description: "Optional ordinary structured review result JSON"
     required: false
     default: ""
+  review-result-source:
+    description: "Traceable provenance reference for review-result-file; required when that file is supplied"
+    required: false
+    default: ""
   continuity-result-file:
     description: "Optional V1.11 continuity structured review result JSON"
     required: false
     default: ""
+  continuity-result-source:
+    description: "Traceable provenance reference for continuity-result-file; required when that file is supplied"
+    required: false
+    default: ""
   reviewer-name:
-    description: "Reviewer identity prefilled into the generated handoff"
+    description: "Reviewer identity prefilled into generated handoff"
     required: false
     default: "external-reviewer"
   reviewer-model:
@@ -61,7 +81,7 @@ inputs:
 
 outputs:
   manifest-file:
-    description: "Compact cycle manifest JSON"
+    description: "Compact strict-cycle manifest JSON"
     value: ${{ steps.cycle.outputs.manifest-file }}
   head-sha:
     description: "Exact PR head used by this cycle"
@@ -76,11 +96,23 @@ outputs:
     description: "Deterministic next action for the caller"
     value: ${{ steps.cycle.outputs.next-action }}
   gate-status:
-    description: "Advisory integration gate status, or NOT_RUN"
+    description: "Underlying advisory integration gate status, or NOT_RUN"
     value: ${{ steps.cycle.outputs.gate-status }}
+  semantic-status:
+    description: "Validated semantic result status, or NOT_RUN"
+    value: ${{ steps.cycle.outputs.semantic-status }}
+  live-review-bound:
+    description: "true only when the current structured result is valid and bound to the exact live head"
+    value: ${{ steps.cycle.outputs.live-review-bound }}
   merge-candidate:
-    description: "true only when current evidence is an advisory exact-head merge candidate"
+    description: "true only after a current-cycle live-bound VALID_PASS and READY_TO_MERGE gate"
     value: ${{ steps.cycle.outputs.merge-candidate }}
+  safety-status:
+    description: "SAFE_TO_MERGE_ADVISORY, SAFE_TO_REVIEW, REPAIR_REQUIRED, WAIT_FOR_GATES, BLOCKED or NO_MERGE_SIGNAL"
+    value: ${{ steps.cycle.outputs.safety-status }}
+  baseline-authority:
+    description: "NONE, UNCONFIRMED_CLAIM, CONFIRMED_EXTERNAL or FAILED_REVIEW_LINEAGE"
+    value: ${{ steps.cycle.outputs.baseline-authority }}
   checkpoint-file:
     description: "Reusable failed-review checkpoint; empty after a valid PASS or when no failed lineage exists"
     value: ${{ steps.cycle.outputs.checkpoint-file }}
@@ -99,15 +131,30 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         PYTHONPATH: ${{ github.action_path }}/../src
+        EXPECTED_HEAD_INPUT: ${{ inputs.expected-head }}
+        EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
         ACCEPTED_HEAD: ${{ inputs.accepted-head }}
+        CONFIRM_ACCEPTED_HEAD_AUTHORITY: ${{ inputs.confirm-accepted-head-authority }}
+        ACCEPTED_HEAD_SOURCE: ${{ inputs.accepted-head-source }}
         PREVIOUS_FAILED_SOURCE_FILE: ${{ inputs.previous-failed-source-file }}
         REVIEW_RESULT_FILE: ${{ inputs.review-result-file }}
+        REVIEW_RESULT_SOURCE: ${{ inputs.review-result-source }}
         CONTINUITY_RESULT_FILE: ${{ inputs.continuity-result-file }}
+        CONTINUITY_RESULT_SOURCE: ${{ inputs.continuity-result-source }}
         REVIEWER_NAME: ${{ inputs.reviewer-name }}
         REVIEWER_MODEL: ${{ inputs.reviewer-model }}
       run: |
         set -euo pipefail
-        outdir="${RUNNER_TEMP}/jarvis-pr-attention-cycle-${{ inputs.pr-number }}"
+
+        case "$CONFIRM_ACCEPTED_HEAD_AUTHORITY" in
+          true|false) ;;
+          *)
+            echo "confirm-accepted-head-authority must be literal true or false" >&2
+            exit 2
+            ;;
+        esac
+
+        outdir="$(mktemp -d "${RUNNER_TEMP}/jarvis-pr-attention-cycle-${{ inputs.pr-number }}.XXXXXX")"
         manifest="${outdir}/cycle.json"
         args=(
           "${{ inputs.repository }}"
@@ -121,10 +168,20 @@ runs:
           --output-dir "$outdir"
           --output "$manifest"
         )
+
+        effective_expected_head="$EXPECTED_HEAD_INPUT"
+        if [[ -z "$effective_expected_head" && -n "$EVENT_HEAD" ]]; then
+          effective_expected_head="$EVENT_HEAD"
+        fi
+        if [[ -n "$effective_expected_head" ]]; then args+=(--expected-head "$effective_expected_head"); fi
         if [[ -n "$ACCEPTED_HEAD" ]]; then args+=(--accepted-head "$ACCEPTED_HEAD"); fi
+        if [[ "$CONFIRM_ACCEPTED_HEAD_AUTHORITY" == "true" ]]; then args+=(--confirm-accepted-head-authority); fi
+        if [[ -n "$ACCEPTED_HEAD_SOURCE" ]]; then args+=(--accepted-head-source "$ACCEPTED_HEAD_SOURCE"); fi
         if [[ -n "$PREVIOUS_FAILED_SOURCE_FILE" ]]; then args+=(--previous-failed-source-file "$PREVIOUS_FAILED_SOURCE_FILE"); fi
         if [[ -n "$REVIEW_RESULT_FILE" ]]; then args+=(--review-result-file "$REVIEW_RESULT_FILE"); fi
+        if [[ -n "$REVIEW_RESULT_SOURCE" ]]; then args+=(--review-result-source "$REVIEW_RESULT_SOURCE"); fi
         if [[ -n "$CONTINUITY_RESULT_FILE" ]]; then args+=(--continuity-result-file "$CONTINUITY_RESULT_FILE"); fi
+        if [[ -n "$CONTINUITY_RESULT_SOURCE" ]]; then args+=(--continuity-result-source "$CONTINUITY_RESULT_SOURCE"); fi
         if [[ -n "$REVIEWER_MODEL" ]]; then args+=(--reviewer-model "$REVIEWER_MODEL"); fi
 
         python3 -m pr_attention.cycle_cli "${args[@]}"
@@ -139,7 +196,11 @@ runs:
         print(data["review_mode"])
         print(data["next_action"])
         print(data["gate_status"])
+        print(data["semantic_status"])
+        print(str(data["live_review_bound"]).lower())
         print(str(data["merge_candidate"]).lower())
+        print(data["safety_status"])
+        print(data["baseline_authority"])
         print(artifacts.get("checkpoint_file", ""))
         print(artifacts.get("review_envelope_file", ""))
         print(artifacts.get("review_result_template_file", ""))
@@ -153,8 +214,12 @@ runs:
           echo "review-mode=${values[2]}"
           echo "next-action=${values[3]}"
           echo "gate-status=${values[4]}"
-          echo "merge-candidate=${values[5]}"
-          echo "checkpoint-file=${values[6]}"
-          echo "review-envelope-file=${values[7]}"
-          echo "review-result-template-file=${values[8]}"
+          echo "semantic-status=${values[5]}"
+          echo "live-review-bound=${values[6]}"
+          echo "merge-candidate=${values[7]}"
+          echo "safety-status=${values[8]}"
+          echo "baseline-authority=${values[9]}"
+          echo "checkpoint-file=${values[10]}"
+          echo "review-envelope-file=${values[11]}"
+          echo "review-result-template-file=${values[12]}"
         } >> "$GITHUB_OUTPUT"

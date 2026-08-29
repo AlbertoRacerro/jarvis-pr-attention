@@ -15,29 +15,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run compact V1.11 cycle action
-        id: cycle
+      - name: Prove naked accepted-head cannot reduce review scope
+        id: unconfirmed
         uses: ./cycle
         with:
           pr-number: ${{ github.event.pull_request.number }}
           accepted-head: ${{ github.event.pull_request.base.sha }}
           reviewer-name: cycle-dogfood
 
-      - name: Verify compact contract and artifacts
+      - name: Verify strict unconfirmed-baseline behavior
         shell: bash
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-          ACTUAL_HEAD: ${{ steps.cycle.outputs.head-sha }}
-          REVIEW_MODE: ${{ steps.cycle.outputs.review-mode }}
-          MERGE_CANDIDATE: ${{ steps.cycle.outputs.merge-candidate }}
-          MANIFEST_FILE: ${{ steps.cycle.outputs.manifest-file }}
-          ENVELOPE_FILE: ${{ steps.cycle.outputs.review-envelope-file }}
-          TEMPLATE_FILE: ${{ steps.cycle.outputs.review-result-template-file }}
+          ACTUAL_HEAD: ${{ steps.unconfirmed.outputs.head-sha }}
+          REVIEW_MODE: ${{ steps.unconfirmed.outputs.review-mode }}
+          NEXT_ACTION: ${{ steps.unconfirmed.outputs.next-action }}
+          MERGE_CANDIDATE: ${{ steps.unconfirmed.outputs.merge-candidate }}
+          SAFETY_STATUS: ${{ steps.unconfirmed.outputs.safety-status }}
+          BASELINE_AUTHORITY: ${{ steps.unconfirmed.outputs.baseline-authority }}
+          ENVELOPE_FILE: ${{ steps.unconfirmed.outputs.review-envelope-file }}
+        run: |
+          set -euo pipefail
+          test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
+          test "$REVIEW_MODE" = "FULL"
+          test "$NEXT_ACTION" = "FULL_REVIEW"
+          test "$MERGE_CANDIDATE" = "false"
+          test "$SAFETY_STATUS" = "BLOCKED"
+          test "$BASELINE_AUTHORITY" = "UNCONFIRMED_CLAIM"
+          test -z "$ENVELOPE_FILE"
+
+      - name: Exercise explicit synthetic delta-authority path
+        id: confirmed
+        uses: ./cycle
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          accepted-head: ${{ github.event.pull_request.base.sha }}
+          confirm-accepted-head-authority: "true"
+          accepted-head-source: "dogfood:synthetic-base-sha-for-action-path-only"
+          reviewer-name: cycle-dogfood
+
+      - name: Verify compact review handoff contract
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          ACTUAL_HEAD: ${{ steps.confirmed.outputs.head-sha }}
+          REVIEW_MODE: ${{ steps.confirmed.outputs.review-mode }}
+          MERGE_CANDIDATE: ${{ steps.confirmed.outputs.merge-candidate }}
+          SAFETY_STATUS: ${{ steps.confirmed.outputs.safety-status }}
+          BASELINE_AUTHORITY: ${{ steps.confirmed.outputs.baseline-authority }}
+          MANIFEST_FILE: ${{ steps.confirmed.outputs.manifest-file }}
+          ENVELOPE_FILE: ${{ steps.confirmed.outputs.review-envelope-file }}
+          TEMPLATE_FILE: ${{ steps.confirmed.outputs.review-result-template-file }}
         run: |
           set -euo pipefail
           test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
           test "$REVIEW_MODE" = "DELTA"
           test "$MERGE_CANDIDATE" = "false"
+          test "$SAFETY_STATUS" = "SAFE_TO_REVIEW"
+          test "$BASELINE_AUTHORITY" = "CONFIRMED_EXTERNAL"
           test -s "$MANIFEST_FILE"
           test -s "$ENVELOPE_FILE"
           test -s "$TEMPLATE_FILE"
@@ -46,8 +81,11 @@ jobs:
           with open(sys.argv[1], encoding="utf-8") as handle:
               data = json.load(handle)
           assert data["kind"] == "PR_ATTENTION_CYCLE"
+          assert data["schema_version"] == 2
           assert data["review_mode"] == "DELTA"
-          assert data["head_sha"]
+          assert data["merge_candidate"] is False
+          assert data["safety"]["merge_signal_requires_current_live_pass"] is True
+          assert data["safety"]["expected_head_bound"] is True
           assert data["artifacts"]["review_envelope_file"]
           assert data["artifacts"]["review_result_template_file"]
           PY
