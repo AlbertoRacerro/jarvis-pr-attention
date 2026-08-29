@@ -1,6 +1,6 @@
 # jarvis-pr-attention
 
-Deterministic exact-head PR attention snapshots, incremental review plans, bounded delta review packets, reviewer handoff artifacts, and structured review-result validation for agentic software delivery.
+Deterministic exact-head PR attention snapshots, incremental review plans, bounded delta review packets, reviewer handoff artifacts, structured review-result validation, and advisory integration gates for agentic software delivery.
 
 `jarvis-pr-attention` is a small, read-only GitHub fact collector. It turns live pull-request state into machine-readable evidence without invoking an LLM and without becoming a second source of truth.
 
@@ -18,10 +18,11 @@ Deterministic exact-head PR attention snapshots, incremental review plans, bound
 - Diverged/behind baselines and incomplete large compare results fail closed to full review.
 - Reviewer-produced results are treated as claims and are accepted only when they bind exactly to the packet/head they reviewed.
 - Patch text remains explicitly untrusted throughout reviewer handoff.
+- Positive semantic review cannot override stale, blocked, pending, or incomplete GitHub evidence.
 
 ## CLI
 
-Requires Python 3.11+. GitHub-reading commands require `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository. Packet digesting, reviewer handoff generation, and non-live result validation work offline.
+Requires Python 3.11+. GitHub-reading commands require `GITHUB_TOKEN` (or `GH_TOKEN`) with read access to the target repository. Packet digesting, reviewer handoff generation, non-live result validation, and integration-gate evaluation work offline.
 
 ```bash
 PYTHONPATH=src python -m pr_attention snapshot owner/repo 123
@@ -156,9 +157,34 @@ PYTHONPATH=src python -m pr_attention review-envelope packet.json \
   --output review-envelope.json
 ```
 
-The envelope contains fixed tool-generated safety notices, the expected output contract, required file paths, the bound result template, and the original packet exactly once. Repository patches cannot redefine the handoff rules and remain marked `UNTRUSTED_REPOSITORY_CONTENT`.
+The envelope explicitly separates tool-generated `control_plane` instructions from repository-derived `untrusted_evidence`. Repository patches cannot redefine the review contract and remain marked `UNTRUSTED_REPOSITORY_CONTENT`.
 
 See [docs/REVIEWER_HANDOFF.md](docs/REVIEWER_HANDOFF.md) for the model-agnostic flow and trust boundary.
+
+## Advisory integration gate
+
+After a structured semantic result has been validated, combine it with an exact GitHub snapshot:
+
+```bash
+PYTHONPATH=src python -m pr_attention integration-gate \
+  snapshot.json review-validation.json \
+  --output integration-gate.json
+```
+
+The gate is deterministic and offline. Its statuses are:
+
+- `READY_TO_MERGE` — valid live-bound semantic PASS + current GitHub `READY`;
+- `WAIT_FOR_GATES` — semantic PASS but current checks/mergeability are pending;
+- `REPAIR` — semantic FAIL or GitHub blocking state;
+- `REVIEW_REQUIRED` — semantic result is invalid;
+- `NEEDS_HUMAN` — reviewer explicitly escalated;
+- `VERIFY_LIVE` — semantic PASS is valid offline but has not been bound to the live PR head;
+- `STALE` — snapshot/review/live-head evidence refers to a moved or mismatched head;
+- `UNKNOWN` — malformed or incomplete evidence cannot be mapped safely.
+
+`READY_TO_MERGE` remains **advisory only**. It never executes a merge. The caller must still refresh repository state as required by its governance and merge using an exact expected-head guard.
+
+See [docs/INTEGRATION_GATE.md](docs/INTEGRATION_GATE.md) for precedence, exit codes, and Action behavior.
 
 ## Snapshot fields
 
@@ -191,19 +217,20 @@ steps:
       pr-number: ${{ github.event.pull_request.number }}
       accepted-head: ${{ steps.authority.outputs.last-accepted-head }}
       reviewer-name: ChatGPT
+      review-result-file: review-result.json
   - run: |
       echo "attention=${{ steps.attention.outputs.attention }}"
-      echo "next=${{ steps.attention.outputs.next-action-class }}"
-      echo "scope=${{ steps.attention.outputs.review-scope }}"
       echo "packet=${{ steps.attention.outputs.packet-sha256 }}"
-      echo "envelope=${{ steps.attention.outputs.review-envelope-file }}"
+      echo "semantic=${{ steps.attention.outputs.review-result-status }}"
+      echo "gate=${{ steps.attention.outputs.integration-gate-status }}"
+      echo "ready=${{ steps.attention.outputs.integration-merge-ready }}"
 ```
 
 When `accepted-head` is supplied, Action outputs include snapshot/packet evidence plus `packet-sha256`, `review-result-template-file`, and `review-envelope-file`.
 
-If `review-result-file` is supplied, the Action regenerates the packet, validates the structured result against it and the live PR head, then emits `review-result-status`, `review-result-valid`, and `review-result-validation-file`. These remain evidence only; the Action never approves or merges.
+If `review-result-file` is supplied, the Action regenerates the packet, validates the structured result against it and the live PR head, computes the advisory integration gate, and emits `review-result-status`, `review-result-valid`, `review-result-validation-file`, `integration-gate-status`, `integration-merge-ready`, and `integration-gate-file`.
 
-Pin the action to an exact commit SHA in production consumers.
+These remain evidence only; the Action never approves or merges. Pin the action to an exact commit SHA in production consumers.
 
 ## Development
 
