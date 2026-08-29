@@ -7,6 +7,8 @@ from typing import Sequence
 
 from .github import GitHubClient, GitHubError
 from .review_result import load_json_object
+from .rereview_gate import build_rereview_integration_gate
+from .rereview_handoff import build_rereview_envelope
 from .rereview_packet import (
     DEFAULT_MAX_FILE_PATCH_BYTES,
     DEFAULT_MAX_TOTAL_PATCH_BYTES,
@@ -50,12 +52,24 @@ def build_parser() -> argparse.ArgumentParser:
     template.add_argument("--reviewer-model")
     template.add_argument("--output")
 
+    envelope = sub.add_parser("envelope", help="build deterministic reviewer control plane plus untrusted re-review evidence")
+    envelope.add_argument("packet_file")
+    envelope.add_argument("--reviewer-name", required=True)
+    envelope.add_argument("--reviewer-model")
+    envelope.add_argument("--output")
+
     validate = sub.add_parser("validate", help="validate a structured re-review result")
     validate.add_argument("packet_file")
     validate.add_argument("result_file")
     validate.add_argument("--live", action="store_true")
     validate.add_argument("--output")
     validate.add_argument("--no-validation-exit", action="store_true")
+
+    gate = sub.add_parser("gate", help="combine current GitHub snapshot and re-review validation into an advisory integration gate")
+    gate.add_argument("snapshot_file")
+    gate.add_argument("validation_file")
+    gate.add_argument("--output")
+    gate.add_argument("--no-gate-exit", action="store_true")
     return parser
 
 
@@ -81,12 +95,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 94
             return 0 if payload.get("coverage") == "COMPLETE" and payload.get("complete") is True else 95
 
+        if args.command == "gate":
+            snapshot = load_json_object(args.snapshot_file)
+            validation = load_json_object(args.validation_file)
+            gate = build_rereview_integration_gate(snapshot, validation)
+            payload = gate.to_dict()
+            _write(payload, args.output)
+            if args.no_gate_exit:
+                return 0
+            return {
+                "READY_TO_MERGE": 0,
+                "WAIT_FOR_GATES": 80,
+                "REPAIR": 81,
+                "REVIEW_REQUIRED": 82,
+                "NEEDS_HUMAN": 83,
+                "VERIFY_LIVE": 84,
+                "STALE": 85,
+                "UNKNOWN": 86,
+            }[gate.status]
+
         packet = load_json_object(args.packet_file)
         if args.command == "digest":
             print(rereview_packet_sha256(packet))
             return 0
         if args.command == "template":
             payload = build_rereview_result_template(
+                packet,
+                reviewer_name=args.reviewer_name,
+                reviewer_model=args.reviewer_model,
+            )
+            _write(payload, args.output)
+            return 0
+        if args.command == "envelope":
+            payload = build_rereview_envelope(
                 packet,
                 reviewer_name=args.reviewer_name,
                 reviewer_model=args.reviewer_model,
