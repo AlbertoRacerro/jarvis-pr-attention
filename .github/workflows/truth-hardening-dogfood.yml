@@ -1,6 +1,7 @@
 name: Truth hardening dogfood
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 permissions:
   contents: read
   checks: read
@@ -30,6 +31,7 @@ jobs:
         env:
           SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -47,8 +49,9 @@ jobs:
           assert isinstance(required["sources"], list)
 
           native = snapshot["reviews"]["native_policy"]
+          expected_draft = os.environ["EXPECTED_DRAFT"].strip().lower() == "true"
           assert native["known"] is True
-          assert native["draft"] is False
+          assert native["draft"] is expected_draft
           assert native["review_decision"] in {"NONE", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"}
           assert any("not Jarvis semantic acceptance" in reason for reason in native["reasons"])
           PY

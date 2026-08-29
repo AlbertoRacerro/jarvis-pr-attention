@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-pr-attention"
-version = "0.12.0"
+version = "0.13.0"
 description = "Deterministic exact-head PR attention snapshots for agentic software delivery."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ pr-attention-bundle = "pr_attention.bundle_cli:main"
 pr-attention-compact = "pr_attention.compact_cli:main"
 pr-attention-rereview = "pr_attention.rereview_cli:main"
 pr-attention-rereview-bundle = "pr_attention.rereview_bundle_cli:main"
+pr-attention-continuity = "pr_attention.continuity_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
