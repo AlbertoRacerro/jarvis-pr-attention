@@ -18,11 +18,16 @@ from .rereview_packet_v11 import (
 def _render_thread_comments(comments: list[dict[str, Any]]) -> str:
     rendered: list[str] = []
     for index, comment in enumerate(comments, start=1):
-        author = ((comment.get("author") or {}).get("login")) if isinstance(comment.get("author"), dict) else None
-        body = comment.get("body") if isinstance(comment.get("body"), str) else ""
+        author = comment.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        body = comment.get("body")
+        if not isinstance(body, str):
+            raise GitHubError("review-thread comment body was not a string")
+        if author is not None and (not isinstance(author, dict) or not isinstance(login, str) or not login):
+            raise GitHubError("review-thread comment author was malformed")
         rendered.append(
             json.dumps(
-                {"comment_index": index, "author": author if isinstance(author, str) else None, "body": body},
+                {"comment_index": index, "author": login, "body": body},
                 sort_keys=True,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -32,15 +37,20 @@ def _render_thread_comments(comments: list[dict[str, Any]]) -> str:
 
 
 def collect_review_threads_v11(client: GitHubClient, repo: str, number: int) -> tuple[list[dict[str, Any]], bool]:
-    """Return all current thread comments up to GitHub's nested 100-comment cap.
+    """Return review-thread evidence without silently accepting partial GraphQL facts.
 
-    Thread pagination is complete up to MAX_PAGES. A thread with more than 100
-    comments is returned with its first 100 comments but marks the overall
-    collection incomplete, so the caller cannot produce a COMPLETE re-review
-    packet or a semantic PASS from partial thread evidence.
+    Thread pagination is complete up to MAX_PAGES. Each thread carries up to
+    100 comments. If GitHub reports more nested comments than that cap, the
+    returned evidence is explicitly incomplete so callers cannot produce a
+    COMPLETE incremental packet or semantic PASS from partial thread history.
     """
 
+    if "/" not in repo or not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise GitHubError("invalid repository or pull-request identifier for review-thread collection")
     owner, name = repo.split("/", 1)
+    if not owner or not name:
+        raise GitHubError("invalid repository identifier for review-thread collection")
+
     query = """
     query ReviewThreadsV11($owner: String!, $name: String!, $number: Int!, $after: String) {
       repository(owner: $owner, name: $name) {
@@ -69,43 +79,65 @@ def collect_review_threads_v11(client: GitHubClient, repo: str, number: int) -> 
 
     for _ in range(MAX_PAGES):
         data = client.graphql(query, {"owner": owner, "name": name, "number": number, "after": after})
-        pr = (((data.get("repository") or {}).get("pullRequest")) or {})
-        connection = pr.get("reviewThreads") or {}
-        raw_nodes = connection.get("nodes") or []
+        if not isinstance(data, dict):
+            raise GitHubError("reviewThreads GraphQL response was not an object")
+        repository = data.get("repository")
+        if not isinstance(repository, dict):
+            raise GitHubError("reviewThreads GraphQL response omitted repository evidence")
+        pr = repository.get("pullRequest")
+        if not isinstance(pr, dict):
+            raise GitHubError("reviewThreads GraphQL response omitted pull-request evidence")
+        connection = pr.get("reviewThreads")
+        if not isinstance(connection, dict):
+            raise GitHubError("reviewThreads GraphQL response omitted thread connection evidence")
+        raw_nodes = connection.get("nodes")
         if not isinstance(raw_nodes, list):
             raise GitHubError("reviewThreads nodes were not a list")
 
         for raw in raw_nodes:
             if not isinstance(raw, dict):
                 raise GitHubError("reviewThreads contained an invalid thread node")
-            comments_connection = raw.get("comments") or {}
-            comments = comments_connection.get("nodes") or []
-            if not isinstance(comments, list):
-                raise GitHubError("review-thread comments nodes were not a list")
+            thread_id = raw.get("id")
+            path = raw.get("path")
+            if not isinstance(thread_id, str) or not thread_id:
+                raise GitHubError("review thread omitted a valid id")
+            if not isinstance(path, str) or not path:
+                raise GitHubError("review thread omitted a valid path")
+            if not isinstance(raw.get("isResolved"), bool) or not isinstance(raw.get("isOutdated"), bool):
+                raise GitHubError("review thread omitted resolved/outdated truth")
+
+            comments_connection = raw.get("comments")
+            if not isinstance(comments_connection, dict):
+                raise GitHubError("review thread omitted comment connection evidence")
+            comments = comments_connection.get("nodes")
+            if not isinstance(comments, list) or not comments:
+                raise GitHubError("review thread omitted its comment history")
             if any(not isinstance(comment, dict) for comment in comments):
                 raise GitHubError("review-thread comments contained an invalid node")
-            comments_page = comments_connection.get("pageInfo") or {}
-            if comments_page.get("hasNextPage") is True:
+            comments_page = comments_connection.get("pageInfo")
+            if not isinstance(comments_page, dict) or not isinstance(comments_page.get("hasNextPage"), bool):
+                raise GitHubError("review-thread comment pagination evidence was malformed")
+            if comments_page["hasNextPage"] is True:
                 comments_complete = False
 
+            first_author = comments[0].get("author")
+            first_login = first_author.get("login") if isinstance(first_author, dict) else None
+            rendered_body = _render_thread_comments(comments)
             normalized = dict(raw)
-            first_author = None
-            if comments:
-                author = comments[0].get("author")
-                if isinstance(author, dict) and isinstance(author.get("login"), str):
-                    first_author = author["login"]
             normalized["comments"] = {
                 "nodes": [
                     {
-                        "author": {"login": first_author} if first_author else None,
-                        "body": _render_thread_comments(comments),
+                        "author": {"login": first_login} if isinstance(first_login, str) and first_login else None,
+                        "body": rendered_body,
                     }
                 ]
             }
             nodes.append(normalized)
 
-        page_info = connection.get("pageInfo") or {}
-        threads_have_next = page_info.get("hasNextPage") is True
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, dict) or not isinstance(page_info.get("hasNextPage"), bool):
+            raise GitHubError("reviewThreads pagination evidence was malformed")
+        threads_have_next = page_info["hasNextPage"] is True
         if not threads_have_next:
             return nodes, comments_complete
         after = page_info.get("endCursor")
