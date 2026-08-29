@@ -3,7 +3,7 @@ import unittest
 
 from pr_attention.evidence_bundle import build_evidence_bundle, verify_evidence_bundle
 from pr_attention.handoff import build_review_envelope
-from pr_attention.review_result import packet_sha256
+from pr_attention.review_result import packet_sha256, validate_review_result
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -55,19 +55,25 @@ def packet():
     }
 
 
-def validation(pkt):
+def review_result(pkt):
     return {
         "schema_version": 1,
-        "valid": True,
-        "status": "VALID_PASS",
         "repository": "o/r",
         "pr_number": 7,
+        "accepted_head_sha": BASE,
         "head_sha": HEAD,
         "packet_sha256": packet_sha256(pkt),
+        "reviewer": {"name": "tester"},
         "verdict": "PASS",
-        "live_head_sha": HEAD,
-        "reasons": [],
+        "reviewed_files": ["a.py"],
+        "findings": [],
+        "notes": [],
     }
+
+
+def validation(pkt, result=None):
+    result = result or review_result(pkt)
+    return validate_review_result(pkt, result, live_head_sha=HEAD).to_dict()
 
 
 def gate(pkt):
@@ -96,11 +102,13 @@ class EvidenceBundleTests(unittest.TestCase):
 
     def test_full_bundle_is_integration_evaluated(self):
         pkt = packet()
+        result = review_result(pkt)
         env = build_review_envelope(pkt, reviewer_name="tester")
-        bundle = build_evidence_bundle(snapshot(), packet=pkt, envelope=env, validation=validation(pkt), integration_gate=gate(pkt))
+        bundle = build_evidence_bundle(snapshot(), packet=pkt, envelope=env, review_result=result, validation=validation(pkt, result), integration_gate=gate(pkt))
         self.assertEqual(bundle["phase"], "INTEGRATION_EVALUATED")
         self.assertTrue(bundle["merge_ready"])
         self.assertEqual(bundle["component_digests"]["packet_sha256"], packet_sha256(pkt))
+        self.assertEqual(bundle["evidence"]["review_result"], result)
         self.assertTrue(verify_evidence_bundle(bundle).valid)
 
     def test_bundle_stores_control_plane_without_duplicate_packet(self):
@@ -129,6 +137,14 @@ class EvidenceBundleTests(unittest.TestCase):
         tampered["evidence"]["review_packet"]["files"][0]["patch"] = "+malicious\n"
         self.assertFalse(verify_evidence_bundle(tampered).valid)
 
+    def test_reviewer_finding_tampering_invalidates_bundle(self):
+        pkt = packet()
+        result = review_result(pkt)
+        bundle = build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result))
+        tampered = copy.deepcopy(bundle)
+        tampered["evidence"]["review_result"]["notes"] = ["changed"]
+        self.assertFalse(verify_evidence_bundle(tampered).valid)
+
     def test_top_level_tampering_invalidates_bundle(self):
         bundle = build_evidence_bundle(snapshot())
         bundle["attention"] = "BLOCKED"
@@ -147,6 +163,11 @@ class EvidenceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "envelope"):
             build_evidence_bundle(snapshot(), packet=pkt, envelope=env)
 
+    def test_validation_requires_reviewer_result(self):
+        pkt = packet()
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            build_evidence_bundle(snapshot(), packet=pkt, validation=validation(pkt))
+
     def test_gate_without_validation_is_rejected(self):
         pkt = packet()
         with self.assertRaisesRegex(ValueError, "requires review validation"):
@@ -154,37 +175,39 @@ class EvidenceBundleTests(unittest.TestCase):
 
     def test_inconsistent_merge_ready_is_rejected(self):
         pkt = packet()
+        result = review_result(pkt)
         bad_gate = gate(pkt)
         bad_gate["merge_ready"] = False
         with self.assertRaisesRegex(ValueError, "merge_ready"):
-            build_evidence_bundle(snapshot(), packet=pkt, validation=validation(pkt), integration_gate=bad_gate)
+            build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad_gate)
 
-    def test_invalid_validation_status_is_rejected(self):
+    def test_validation_tampering_is_rejected(self):
         pkt = packet()
-        bad = validation(pkt)
-        bad["status"] = "TRUST_ME"
-        with self.assertRaisesRegex(ValueError, "status/valid"):
-            build_evidence_bundle(snapshot(), packet=pkt, validation=bad)
-
-    def test_valid_pass_requires_pass_verdict(self):
-        pkt = packet()
-        bad = validation(pkt)
-        bad["verdict"] = "FAIL"
-        with self.assertRaisesRegex(ValueError, "verdict"):
-            build_evidence_bundle(snapshot(), packet=pkt, validation=bad)
+        result = review_result(pkt)
+        bad = validation(pkt, result)
+        bad["status"] = "VALID_FAIL"
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=bad)
 
     def test_unknown_gate_status_is_rejected(self):
         pkt = packet()
+        result = review_result(pkt)
         bad = gate(pkt)
         bad["status"] = "MAGIC"
         bad["merge_ready"] = False
         with self.assertRaisesRegex(ValueError, "state fields"):
-            build_evidence_bundle(snapshot(), packet=pkt, validation=validation(pkt), integration_gate=bad)
+            build_evidence_bundle(snapshot(), packet=pkt, review_result=result, validation=validation(pkt, result), integration_gate=bad)
 
     def test_invalid_snapshot_attention_is_rejected(self):
         snap = snapshot()
         snap["attention"] = "MAYBE"
         with self.assertRaisesRegex(ValueError, "attention"):
+            build_evidence_bundle(snap)
+
+    def test_inconsistent_snapshot_stale_flag_is_rejected(self):
+        snap = snapshot()
+        snap["stale"] = True
+        with self.assertRaisesRegex(ValueError, "stale flag"):
             build_evidence_bundle(snap)
 
     def test_boolean_pr_number_does_not_alias_integer(self):
@@ -200,16 +223,6 @@ class EvidenceBundleTests(unittest.TestCase):
         pkt["pr_number"] = True
         with self.assertRaisesRegex(ValueError, "repository/pr_number"):
             build_evidence_bundle(snap, packet=pkt)
-
-    def test_validation_boolean_pr_number_does_not_alias_pr_one(self):
-        snap = snapshot()
-        pkt = packet()
-        snap["pr_number"] = 1
-        pkt["pr_number"] = 1
-        review = validation(pkt)
-        review["pr_number"] = True
-        with self.assertRaisesRegex(ValueError, "binding"):
-            build_evidence_bundle(snap, packet=pkt, validation=review)
 
 
 if __name__ == "__main__":
