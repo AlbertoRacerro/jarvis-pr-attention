@@ -16,6 +16,13 @@ CONTROL_TRUST = "TOOL_GENERATED_CONTROL_DATA"
 DIGEST_NOTICE = "SHA-256 values are deterministic content identities, not signatures or provenance proofs"
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ATTENTION = {"READY", "PENDING", "BLOCKED", "STALE", "UNKNOWN"}
+_RELATIONS = {"ABSENT", "CURRENT", "AHEAD", "BEHIND", "DIVERGED", "UNKNOWN"}
+_SCOPES = {"NONE", "DELTA", "FULL", "UNKNOWN"}
+_COVERAGE = {"COMPLETE", "PARTIAL", "NONE", "UNKNOWN"}
+_VALIDATION = {"VALID_PASS", "VALID_FAIL", "VALID_NEEDS_HUMAN", "STALE", "INVALID"}
+_GATE = {"READY_TO_MERGE", "WAIT_FOR_GATES", "REPAIR", "REVIEW_REQUIRED", "NEEDS_HUMAN", "VERIFY_LIVE", "STALE", "UNKNOWN"}
+_EXPECTED_VERDICT = {"VALID_PASS": "PASS", "VALID_FAIL": "FAIL", "VALID_NEEDS_HUMAN": "NEEDS_HUMAN"}
 _SNAPSHOT_FIELDS = (
     "schema_version", "repository", "pr_number", "title", "base_ref", "head_ref",
     "head_sha", "final_head_sha", "scope", "checks", "reviews", "threads", "merge",
@@ -66,23 +73,33 @@ def _require_snapshot(snapshot: dict[str, Any]) -> tuple[str, int, str, str, dic
         raise ValueError("snapshot repository/pr_number is invalid")
     if not _valid_sha(head) or not _valid_sha(final):
         raise ValueError("snapshot head binding is invalid")
-    if not isinstance(delta, dict):
+    if snapshot.get("attention") not in _ATTENTION or not isinstance(snapshot.get("facts_complete"), bool) or not isinstance(snapshot.get("stale"), bool):
+        raise ValueError("snapshot attention/completeness fields are invalid")
+    if not isinstance(delta, dict) or delta.get("relation") not in _RELATIONS or delta.get("review_scope") not in _SCOPES:
         raise ValueError("snapshot delta is invalid")
+    accepted = delta.get("accepted_head_sha")
+    if delta.get("relation") == "ABSENT":
+        if accepted is not None:
+            raise ValueError("ABSENT snapshot delta cannot contain accepted_head_sha")
+    elif not _valid_sha(accepted):
+        raise ValueError("snapshot accepted_head_sha is invalid")
     return repo, number, head, final, delta
 
 
 def _require_packet(packet: dict[str, Any], snapshot: dict[str, Any], delta: dict[str, Any]) -> tuple[str, list[str]]:
     if packet.get("schema_version") != 1 or isinstance(packet.get("schema_version"), bool):
         raise ValueError("unsupported review packet schema_version")
-    for key in ("repository", "pr_number", "head_sha", "final_head_sha"):
+    if packet.get("repository") != snapshot.get("repository") or _pr(packet.get("pr_number")) != snapshot.get("pr_number"):
+        raise ValueError("review packet repository/pr_number does not match snapshot")
+    for key in ("head_sha", "final_head_sha"):
         if packet.get(key) != snapshot.get(key):
             raise ValueError(f"review packet {key} does not match snapshot")
-    if packet.get("accepted_head_sha") != delta.get("accepted_head_sha"):
+    if not _valid_sha(packet.get("accepted_head_sha")) or packet.get("accepted_head_sha") != delta.get("accepted_head_sha"):
         raise ValueError("review packet accepted head does not match snapshot")
-    if packet.get("relation") != delta.get("relation") or packet.get("review_scope") != delta.get("review_scope"):
+    if packet.get("relation") not in _RELATIONS or packet.get("relation") != delta.get("relation") or packet.get("review_scope") not in _SCOPES or packet.get("review_scope") != delta.get("review_scope"):
         raise ValueError("review packet delta scope does not match snapshot")
-    if packet.get("content_trust") != CONTENT_TRUST:
-        raise ValueError("review packet trust marker is invalid")
+    if packet.get("content_trust") != CONTENT_TRUST or packet.get("coverage") not in _COVERAGE or not isinstance(packet.get("complete"), bool):
+        raise ValueError("review packet trust/coverage fields are invalid")
     files = packet.get("files")
     if not isinstance(files, list):
         raise ValueError("review packet files are invalid")
@@ -93,7 +110,7 @@ def _require_packet(packet: dict[str, Any], snapshot: dict[str, Any], delta: dic
 
 
 def _control_from_envelope(envelope: dict[str, Any], packet: dict[str, Any], digest: str, paths: list[str]) -> dict[str, Any]:
-    if envelope.get("schema_version") != 1 or envelope.get("purpose") != "SEMANTIC_REVIEW" or envelope.get("packet_sha256") != digest:
+    if envelope.get("schema_version") != 1 or isinstance(envelope.get("schema_version"), bool) or envelope.get("purpose") != "SEMANTIC_REVIEW" or envelope.get("packet_sha256") != digest:
         raise ValueError("review envelope binding is invalid")
     untrusted, control = envelope.get("untrusted_evidence"), envelope.get("control_plane")
     if not isinstance(untrusted, dict) or untrusted.get("content_trust") != CONTENT_TRUST or untrusted.get("packet") != packet:
@@ -107,6 +124,37 @@ def _control_from_envelope(envelope: dict[str, Any], packet: dict[str, Any], dig
     if any(template.get(key) != value for key, value in expected.items()):
         raise ValueError("review result template binding does not match packet")
     return control
+
+
+def _require_validation(validation: dict[str, Any], repo: str, number: int, head: str, digest: str) -> None:
+    status, valid, verdict = validation.get("status"), validation.get("valid"), validation.get("verdict")
+    if validation.get("schema_version") != 1 or isinstance(validation.get("schema_version"), bool):
+        raise ValueError("review validation schema_version is invalid")
+    if validation.get("repository") != repo or _pr(validation.get("pr_number")) != number or validation.get("head_sha") != head or validation.get("packet_sha256") != digest:
+        raise ValueError("review validation binding does not match evidence")
+    if status not in _VALIDATION or not isinstance(valid, bool):
+        raise ValueError("review validation status/valid fields are invalid")
+    if status in _EXPECTED_VERDICT and (valid is not True or verdict != _EXPECTED_VERDICT[status]):
+        raise ValueError("review validation verdict is inconsistent with status")
+    if status in {"STALE", "INVALID"} and valid is not False:
+        raise ValueError("stale/invalid review validation requires valid=false")
+    live_head = validation.get("live_head_sha")
+    if live_head is not None and not _valid_sha(live_head):
+        raise ValueError("review validation live_head_sha is invalid")
+
+
+def _require_gate(gate: dict[str, Any], snapshot: dict[str, Any], validation: dict[str, Any], repo: str, number: int, head: str, digest: str) -> None:
+    status = gate.get("status")
+    if gate.get("schema_version") != 1 or isinstance(gate.get("schema_version"), bool):
+        raise ValueError("integration gate schema_version is invalid")
+    if gate.get("repository") != repo or _pr(gate.get("pr_number")) != number or gate.get("head_sha") != head or gate.get("packet_sha256") != digest:
+        raise ValueError("integration gate binding does not match evidence")
+    if status not in _GATE or not isinstance(gate.get("merge_ready"), bool) or not isinstance(gate.get("live_review_bound"), bool):
+        raise ValueError("integration gate state fields are invalid")
+    if gate.get("attention") != snapshot.get("attention") or gate.get("semantic_review_status") != validation.get("status"):
+        raise ValueError("integration gate status binding does not match evidence")
+    if gate.get("merge_ready") is not (status == "READY_TO_MERGE"):
+        raise ValueError("integration gate merge_ready is inconsistent")
 
 
 def _phase(packet: Any, control: Any, validation: Any, gate: Any) -> str:
@@ -140,15 +188,9 @@ def build_evidence_bundle(snapshot: dict[str, Any], *, packet: dict[str, Any] | 
     if envelope is not None:
         control = _control_from_envelope(envelope, packet, digest, paths)
     if validation is not None:
-        if validation.get("schema_version") != 1 or validation.get("repository") != repo or validation.get("pr_number") != number or validation.get("head_sha") != head or validation.get("packet_sha256") != digest:
-            raise ValueError("review validation binding does not match evidence")
+        _require_validation(validation, repo, number, head, digest)
     if integration_gate is not None:
-        if integration_gate.get("schema_version") != 1 or integration_gate.get("repository") != repo or integration_gate.get("pr_number") != number or integration_gate.get("head_sha") != head or integration_gate.get("packet_sha256") != digest:
-            raise ValueError("integration gate binding does not match evidence")
-        if integration_gate.get("attention") != snapshot.get("attention") or integration_gate.get("semantic_review_status") != validation.get("status"):
-            raise ValueError("integration gate status binding does not match evidence")
-        if integration_gate.get("merge_ready") is not (integration_gate.get("status") == "READY_TO_MERGE"):
-            raise ValueError("integration gate merge_ready is inconsistent")
+        _require_gate(integration_gate, snapshot, validation, repo, number, head, digest)
 
     bundle = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
