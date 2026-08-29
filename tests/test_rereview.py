@@ -81,6 +81,14 @@ def prior_packet(*, complete=True):
 
 
 def prior_result(pkt, *, reviewed_files=None):
+    effective_reviewed = reviewed_files if reviewed_files is not None else ["a.py", "b.py"]
+    findings = [
+        {"id": "F1", "severity": "P1", "blocking": True, "title": "Broken invariant", "detail": "a.py violates the contract", "path": "a.py", "line": 10},
+    ]
+    if "b.py" in effective_reviewed:
+        findings.append(
+            {"id": "N1", "severity": "P3", "blocking": False, "title": "Nit", "detail": "non-blocking note", "path": "b.py", "line": 2}
+        )
     return {
         "schema_version": 1,
         "repository": "o/r",
@@ -90,11 +98,8 @@ def prior_result(pkt, *, reviewed_files=None):
         "packet_sha256": packet_sha256(pkt),
         "reviewer": {"name": "reviewer", "model": "test"},
         "verdict": "FAIL",
-        "reviewed_files": reviewed_files if reviewed_files is not None else ["a.py", "b.py"],
-        "findings": [
-            {"id": "F1", "severity": "P1", "blocking": True, "title": "Broken invariant", "detail": "a.py violates the contract", "path": "a.py", "line": 10},
-            {"id": "N1", "severity": "P3", "blocking": False, "title": "Nit", "detail": "non-blocking note", "path": "b.py", "line": 2},
-        ],
+        "reviewed_files": effective_reviewed,
+        "findings": findings,
         "notes": [],
     }
 
