@@ -1,5 +1,5 @@
 name: "Jarvis PR Attention"
-description: "Generate exact-head PR evidence, reviewer handoff, semantic validation, integration gate, unified evidence bundle, and compact agent attention"
+description: "Generate exact-head PR evidence, semantic review/re-review handoff, validation, integration gates, unified evidence bundles, and compact agent attention"
 author: "Alberto Racerro"
 inputs:
   pr-number:
@@ -14,11 +14,11 @@ inputs:
     required: false
     default: ${{ github.token }}
   accepted-head:
-    description: "Last semantically accepted full commit SHA; enables incremental review planning"
+    description: "Last semantically accepted full commit SHA; enables ordinary incremental review planning"
     required: false
     default: ""
   max-total-patch-bytes:
-    description: "Maximum aggregate UTF-8 patch bytes in the review packet"
+    description: "Maximum aggregate UTF-8 patch bytes in review or re-review packets"
     required: false
     default: "120000"
   max-file-patch-bytes:
@@ -34,7 +34,15 @@ inputs:
     required: false
     default: ""
   review-result-file:
-    description: "Optional structured reviewer result JSON to validate against the generated packet and live head"
+    description: "Optional structured ordinary reviewer result JSON to validate against the generated packet and live head"
+    required: false
+    default: ""
+  previous-failed-bundle-file:
+    description: "Optional prior INTEGRATION_EVALUATED evidence bundle with a live-bound semantic FAIL; enables H1-to-H2 incremental re-review"
+    required: false
+    default: ""
+  rereview-result-file:
+    description: "Optional structured incremental re-review result JSON to validate against the H1-to-H2 packet and live head"
     required: false
     default: ""
 outputs:
@@ -57,49 +65,49 @@ outputs:
     description: "Path to the JSON snapshot"
     value: ${{ steps.snapshot.outputs.snapshot-file }}
   review-packet-file:
-    description: "Path to bounded JSON review packet; empty when accepted-head is not supplied"
+    description: "Path to bounded ordinary JSON review packet; empty when accepted-head is not supplied"
     value: ${{ steps.snapshot.outputs.review-packet-file }}
   packet-coverage:
     description: "COMPLETE, PARTIAL, NONE or UNKNOWN"
     value: ${{ steps.snapshot.outputs.packet-coverage }}
   packet-complete:
-    description: "true only when all required delta patch evidence fits and is available"
+    description: "true only when all required ordinary delta patch evidence fits and is available"
     value: ${{ steps.snapshot.outputs.packet-complete }}
   packet-patch-bytes:
-    description: "UTF-8 patch bytes included in the review packet"
+    description: "UTF-8 patch bytes included in the ordinary review packet"
     value: ${{ steps.snapshot.outputs.packet-patch-bytes }}
   packet-sha256:
-    description: "Stable SHA-256 content identity of the semantic review packet evidence; not a signature"
+    description: "Stable SHA-256 content identity of the ordinary semantic review packet evidence; not a signature"
     value: ${{ steps.snapshot.outputs.packet-sha256 }}
   review-result-template-file:
-    description: "Path to reviewer-result JSON template bound to the packet"
+    description: "Path to ordinary reviewer-result JSON template bound to the packet"
     value: ${{ steps.snapshot.outputs.review-result-template-file }}
   review-envelope-file:
-    description: "Path to deterministic reviewer handoff envelope containing control plane plus untrusted evidence"
+    description: "Path to deterministic ordinary reviewer handoff envelope containing control plane plus untrusted evidence"
     value: ${{ steps.snapshot.outputs.review-envelope-file }}
   review-result-status:
     description: "NOT_RUN, VALID_PASS, VALID_FAIL, VALID_NEEDS_HUMAN, STALE or INVALID"
     value: ${{ steps.snapshot.outputs.review-result-status }}
   review-result-valid:
-    description: "true only when the supplied structured review result is valid for this packet/live head"
+    description: "true only when the supplied ordinary structured review result is valid for this packet/live head"
     value: ${{ steps.snapshot.outputs.review-result-valid }}
   review-result-validation-file:
-    description: "Path to JSON review result validation; empty when review-result-file is not supplied"
+    description: "Path to ordinary JSON review result validation; empty when review-result-file is not supplied"
     value: ${{ steps.snapshot.outputs.review-result-validation-file }}
   integration-gate-status:
     description: "NOT_RUN, READY_TO_MERGE, WAIT_FOR_GATES, REPAIR, REVIEW_REQUIRED, NEEDS_HUMAN, VERIFY_LIVE, STALE or UNKNOWN"
     value: ${{ steps.snapshot.outputs.integration-gate-status }}
   integration-merge-ready:
-    description: "true only for advisory READY_TO_MERGE; exact-head merge guard is still required"
+    description: "true only for advisory ordinary READY_TO_MERGE; exact-head merge guard is still required"
     value: ${{ steps.snapshot.outputs.integration-merge-ready }}
   integration-gate-file:
-    description: "Path to JSON integration gate; empty when review-result-file is not supplied"
+    description: "Path to ordinary JSON integration gate; empty when review-result-file is not supplied"
     value: ${{ steps.snapshot.outputs.integration-gate-file }}
   evidence-bundle-file:
-    description: "Path to the unified deterministic evidence bundle JSON"
+    description: "Path to the unified deterministic ordinary-review evidence bundle JSON"
     value: ${{ steps.snapshot.outputs.evidence-bundle-file }}
   evidence-bundle-sha256:
-    description: "Stable content identity of the evidence bundle manifest; not a signature"
+    description: "Stable content identity of the ordinary-review evidence bundle manifest; not a signature"
     value: ${{ steps.snapshot.outputs.evidence-bundle-sha256 }}
   evidence-bundle-phase:
     description: "SNAPSHOT_ONLY, PACKET_READY, REVIEW_HANDOFF_READY, REVIEW_VALIDATED or INTEGRATION_EVALUATED"
@@ -111,14 +119,68 @@ outputs:
     description: "Stable content identity of the compact attention digest"
     value: ${{ steps.compact.outputs.attention-digest-sha256 }}
   attention-next-exact-action:
-    description: "Deterministic next exact action class after integration evaluation when available"
+    description: "Deterministic next exact action class after ordinary integration evaluation when available"
     value: ${{ steps.compact.outputs.attention-next-exact-action }}
   repair-packet-file:
-    description: "Path to bounded repair evidence; empty unless the deterministic integration gate is REPAIR"
+    description: "Path to bounded ordinary repair evidence; empty unless the deterministic ordinary integration gate is REPAIR"
     value: ${{ steps.compact.outputs.repair-packet-file }}
   repair-packet-sha256:
-    description: "Stable content identity of repair evidence; empty when no repair packet is emitted"
+    description: "Stable content identity of ordinary repair evidence; empty when no repair packet is emitted"
     value: ${{ steps.compact.outputs.repair-packet-sha256 }}
+  rereview-mode:
+    description: "true when previous-failed-bundle-file activates incremental re-review orchestration"
+    value: ${{ steps.rereview.outputs.rereview-mode }}
+  rereview-packet-file:
+    description: "Path to H1-to-H2 incremental re-review packet"
+    value: ${{ steps.rereview.outputs.rereview-packet-file }}
+  rereview-packet-sha256:
+    description: "Stable content identity of the incremental re-review packet"
+    value: ${{ steps.rereview.outputs.rereview-packet-sha256 }}
+  rereview-incremental-eligible:
+    description: "true only when the prior failed head is a safe reusable checkpoint and H1 is a strict ancestor of H2"
+    value: ${{ steps.rereview.outputs.rereview-incremental-eligible }}
+  rereview-packet-coverage:
+    description: "COMPLETE, PARTIAL, NONE or UNKNOWN for the H1-to-H2 re-review packet"
+    value: ${{ steps.rereview.outputs.rereview-packet-coverage }}
+  rereview-packet-complete:
+    description: "true only when all H1-to-H2 repair delta and prior-blocker context evidence is complete"
+    value: ${{ steps.rereview.outputs.rereview-packet-complete }}
+  rereview-result-template-file:
+    description: "Path to conservative incremental re-review result template; empty unless incremental evidence is complete"
+    value: ${{ steps.rereview.outputs.rereview-result-template-file }}
+  rereview-envelope-file:
+    description: "Path to deterministic incremental reviewer control-plane envelope; empty unless incremental evidence is complete"
+    value: ${{ steps.rereview.outputs.rereview-envelope-file }}
+  rereview-result-status:
+    description: "NOT_RUN, VALID_PASS, VALID_FAIL, VALID_NEEDS_HUMAN, STALE or INVALID"
+    value: ${{ steps.rereview.outputs.rereview-result-status }}
+  rereview-result-valid:
+    description: "true only when the supplied incremental re-review result is valid for the packet and live head"
+    value: ${{ steps.rereview.outputs.rereview-result-valid }}
+  rereview-result-validation-file:
+    description: "Path to incremental re-review validation; empty when rereview-result-file is not supplied"
+    value: ${{ steps.rereview.outputs.rereview-result-validation-file }}
+  rereview-integration-gate-status:
+    description: "NOT_RUN, READY_TO_MERGE, WAIT_FOR_GATES, REPAIR, REVIEW_REQUIRED, NEEDS_HUMAN, VERIFY_LIVE, STALE or UNKNOWN"
+    value: ${{ steps.rereview.outputs.rereview-integration-gate-status }}
+  rereview-integration-merge-ready:
+    description: "true only for advisory re-review READY_TO_MERGE; exact-head merge guard is still required"
+    value: ${{ steps.rereview.outputs.rereview-integration-merge-ready }}
+  rereview-integration-gate-file:
+    description: "Path to incremental re-review integration gate"
+    value: ${{ steps.rereview.outputs.rereview-integration-gate-file }}
+  rereview-evidence-bundle-file:
+    description: "Path to one self-contained source-FAIL plus H1-to-H2 re-review evidence bundle"
+    value: ${{ steps.rereview.outputs.rereview-evidence-bundle-file }}
+  rereview-evidence-bundle-sha256:
+    description: "Stable content identity of the incremental re-review evidence bundle"
+    value: ${{ steps.rereview.outputs.rereview-evidence-bundle-sha256 }}
+  rereview-evidence-bundle-phase:
+    description: "REREVIEW_PACKET_READY, REREVIEW_HANDOFF_READY, REREVIEW_VALIDATED or REREVIEW_INTEGRATION_EVALUATED"
+    value: ${{ steps.rereview.outputs.rereview-evidence-bundle-phase }}
+  rereview-next-action-class:
+    description: "REREVIEW_DELTA, FULL_REVIEW, MERGE_CANDIDATE, WAIT_FOR_GATES, REPAIR, NEEDS_HUMAN, VERIFY_LIVE, REFRESH_SNAPSHOT or INVESTIGATE_UNKNOWN"
+    value: ${{ steps.rereview.outputs.rereview-next-action-class }}
 runs:
   using: "composite"
   steps:
@@ -322,4 +384,166 @@ runs:
           echo "attention-next-exact-action=${digest_values[1]}"
           echo "repair-packet-file=$repair_out"
           echo "repair-packet-sha256=$repair_digest"
+        } >> "$GITHUB_OUTPUT"
+
+    - id: rereview
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PYTHONPATH: ${{ github.action_path }}/src
+        SOURCE_FAILED_BUNDLE: ${{ inputs.previous-failed-bundle-file }}
+        REREVIEW_RESULT_FILE: ${{ inputs.rereview-result-file }}
+        REVIEWER_NAME: ${{ inputs.reviewer-name }}
+        REVIEWER_MODEL: ${{ inputs.reviewer-model }}
+        MAX_TOTAL_PATCH_BYTES: ${{ inputs.max-total-patch-bytes }}
+        MAX_FILE_PATCH_BYTES: ${{ inputs.max-file-patch-bytes }}
+        SNAPSHOT_FILE: ${{ steps.snapshot.outputs.snapshot-file }}
+        SNAPSHOT_HEAD: ${{ steps.snapshot.outputs.head-sha }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$SOURCE_FAILED_BUNDLE" ]]; then
+          {
+            echo "rereview-mode=false"
+            echo "rereview-packet-file="
+            echo "rereview-packet-sha256="
+            echo "rereview-incremental-eligible=false"
+            echo "rereview-packet-coverage=NONE"
+            echo "rereview-packet-complete=false"
+            echo "rereview-result-template-file="
+            echo "rereview-envelope-file="
+            echo "rereview-result-status=NOT_RUN"
+            echo "rereview-result-valid=false"
+            echo "rereview-result-validation-file="
+            echo "rereview-integration-gate-status=NOT_RUN"
+            echo "rereview-integration-merge-ready=false"
+            echo "rereview-integration-gate-file="
+            echo "rereview-evidence-bundle-file="
+            echo "rereview-evidence-bundle-sha256="
+            echo "rereview-evidence-bundle-phase="
+            echo "rereview-next-action-class="
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [[ ! -f "$SOURCE_FAILED_BUNDLE" ]]; then
+          echo "previous-failed-bundle-file does not exist: $SOURCE_FAILED_BUNDLE" >&2
+          exit 2
+        fi
+
+        packet_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-packet.json"
+        python3 -m pr_attention.rereview_cli packet "${{ inputs.repository }}" "${{ inputs.pr-number }}" "$SOURCE_FAILED_BUNDLE" \
+          --expected-head "$SNAPSHOT_HEAD" \
+          --max-total-patch-bytes "$MAX_TOTAL_PATCH_BYTES" \
+          --max-file-patch-bytes "$MAX_FILE_PATCH_BYTES" \
+          --output "$packet_out" --no-coverage-exit >/dev/null
+        readarray -t packet_values < <(python3 - "$packet_out" <<'PY'
+        import json, sys
+        from pr_attention.rereview_packet import rereview_packet_sha256
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            packet = json.load(handle)
+        print(rereview_packet_sha256(packet))
+        print(str(packet["incremental_eligible"]).lower())
+        print(packet["coverage"])
+        print(str(packet["complete"]).lower())
+        PY
+        )
+        packet_digest="${packet_values[0]}"
+        packet_eligible="${packet_values[1]}"
+        packet_coverage="${packet_values[2]}"
+        packet_complete="${packet_values[3]}"
+
+        template_out=""
+        envelope_out=""
+        if [[ "$packet_eligible" == "true" && "$packet_coverage" == "COMPLETE" && "$packet_complete" == "true" ]]; then
+          template_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-result-template.json"
+          envelope_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-envelope.json"
+          template_args=(template "$packet_out" --reviewer-name "$REVIEWER_NAME" --output "$template_out")
+          envelope_args=(envelope "$packet_out" --reviewer-name "$REVIEWER_NAME" --output "$envelope_out")
+          if [[ -n "$REVIEWER_MODEL" ]]; then
+            template_args+=(--reviewer-model "$REVIEWER_MODEL")
+            envelope_args+=(--reviewer-model "$REVIEWER_MODEL")
+          fi
+          python3 -m pr_attention.rereview_cli "${template_args[@]}" >/dev/null
+          python3 -m pr_attention.rereview_cli "${envelope_args[@]}" >/dev/null
+        fi
+
+        validation_out=""
+        result_status="NOT_RUN"
+        result_valid="false"
+        gate_out=""
+        gate_status="NOT_RUN"
+        gate_merge_ready="false"
+        if [[ -n "$REREVIEW_RESULT_FILE" ]]; then
+          if [[ -z "$envelope_out" ]]; then
+            echo "rereview-result-file requires a complete incrementally eligible re-review packet" >&2
+            exit 2
+          fi
+          validation_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-validation.json"
+          python3 -m pr_attention.rereview_cli validate "$packet_out" "$REREVIEW_RESULT_FILE" \
+            --live --output "$validation_out" --no-validation-exit >/dev/null
+          readarray -t result_values < <(python3 - "$validation_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            validation = json.load(handle)
+        print(validation["status"])
+        print(str(validation["valid"]).lower())
+        PY
+          )
+          result_status="${result_values[0]}"
+          result_valid="${result_values[1]}"
+
+          gate_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-integration-gate.json"
+          python3 -m pr_attention.rereview_cli gate "$SNAPSHOT_FILE" "$validation_out" \
+            --output "$gate_out" --no-gate-exit >/dev/null
+          readarray -t gate_values < <(python3 - "$gate_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            gate = json.load(handle)
+        print(gate["status"])
+        print(str(gate["merge_ready"]).lower())
+        PY
+          )
+          gate_status="${gate_values[0]}"
+          gate_merge_ready="${gate_values[1]}"
+        fi
+
+        bundle_out="${RUNNER_TEMP}/jarvis-pr-attention-${{ inputs.pr-number }}-rereview-evidence-bundle.json"
+        bundle_args=(build "$SNAPSHOT_FILE" "$SOURCE_FAILED_BUNDLE" "$packet_out" --output "$bundle_out")
+        if [[ -n "$envelope_out" ]]; then
+          bundle_args+=(--envelope-file "$envelope_out")
+        fi
+        if [[ -n "$validation_out" ]]; then
+          bundle_args+=(--result-file "$REREVIEW_RESULT_FILE" --validation-file "$validation_out" --integration-gate-file "$gate_out")
+        fi
+        python3 -m pr_attention.rereview_bundle_cli "${bundle_args[@]}" >/dev/null
+        python3 -m pr_attention.rereview_bundle_cli verify "$bundle_out" >/dev/null
+
+        readarray -t bundle_values < <(python3 - "$bundle_out" <<'PY'
+        import json, sys
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            bundle = json.load(handle)
+        print(bundle["bundle_sha256"])
+        print(bundle["phase"])
+        print(bundle["next_action_class"])
+        PY
+        )
+
+        {
+          echo "rereview-mode=true"
+          echo "rereview-packet-file=$packet_out"
+          echo "rereview-packet-sha256=$packet_digest"
+          echo "rereview-incremental-eligible=$packet_eligible"
+          echo "rereview-packet-coverage=$packet_coverage"
+          echo "rereview-packet-complete=$packet_complete"
+          echo "rereview-result-template-file=$template_out"
+          echo "rereview-envelope-file=$envelope_out"
+          echo "rereview-result-status=$result_status"
+          echo "rereview-result-valid=$result_valid"
+          echo "rereview-result-validation-file=$validation_out"
+          echo "rereview-integration-gate-status=$gate_status"
+          echo "rereview-integration-merge-ready=$gate_merge_ready"
+          echo "rereview-integration-gate-file=$gate_out"
+          echo "rereview-evidence-bundle-file=$bundle_out"
+          echo "rereview-evidence-bundle-sha256=${bundle_values[0]}"
+          echo "rereview-evidence-bundle-phase=${bundle_values[1]}"
+          echo "rereview-next-action-class=${bundle_values[2]}"
         } >> "$GITHUB_OUTPUT"
