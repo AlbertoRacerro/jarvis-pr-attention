@@ -35,18 +35,25 @@ jobs:
         with:
           pr-number: ${{ github.event.pull_request.number }}
           accepted-head: ${{ steps.baseline.outputs.sha }}
-      - name: Verify exact head and incremental review plan
+          max-total-patch-bytes: "1000000"
+          max-file-patch-bytes: "250000"
+      - name: Verify exact head, incremental review plan, and bounded packet
         env:
           SNAPSHOT_FILE: ${{ steps.attention.outputs.snapshot-file }}
+          PACKET_FILE: ${{ steps.attention.outputs.review-packet-file }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           EXPECTED_BASELINE: ${{ steps.baseline.outputs.sha }}
           REVIEW_SCOPE: ${{ steps.attention.outputs.review-scope }}
           NEXT_ACTION: ${{ steps.attention.outputs.next-action-class }}
+          PACKET_COVERAGE: ${{ steps.attention.outputs.packet-coverage }}
+          PACKET_COMPLETE: ${{ steps.attention.outputs.packet-complete }}
         run: |
           python3 - <<'PY'
           import json, os
           with open(os.environ["SNAPSHOT_FILE"], encoding="utf-8") as handle:
               snapshot = json.load(handle)
+          with open(os.environ["PACKET_FILE"], encoding="utf-8") as handle:
+              packet = json.load(handle)
           assert snapshot["schema_version"] == 2
           assert snapshot["head_sha"] == os.environ["EXPECTED_HEAD"]
           assert snapshot["final_head_sha"] == os.environ["EXPECTED_HEAD"]
@@ -56,4 +63,16 @@ jobs:
           assert os.environ["REVIEW_SCOPE"] == "DELTA"
           assert os.environ["NEXT_ACTION"] in {"WAIT_FOR_GATES", "REVIEW_DELTA", "REPAIR", "INVESTIGATE_UNKNOWN"}
           assert snapshot["stale"] is False
+          assert packet["schema_version"] == 1
+          assert packet["accepted_head_sha"] == os.environ["EXPECTED_BASELINE"]
+          assert packet["head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert packet["final_head_sha"] == os.environ["EXPECTED_HEAD"]
+          assert packet["content_trust"] == "UNTRUSTED_REPOSITORY_CONTENT"
+          assert packet["review_scope"] == "DELTA"
+          assert packet["coverage"] == "COMPLETE"
+          assert packet["complete"] is True
+          assert packet["included_patch_bytes"] > 0
+          assert packet["files"]
+          assert os.environ["PACKET_COVERAGE"] == "COMPLETE"
+          assert os.environ["PACKET_COMPLETE"] == "true"
           PY
